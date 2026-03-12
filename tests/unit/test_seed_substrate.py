@@ -15,6 +15,7 @@ from shared.schemas import (
     ChatUsage,
     ConnectionStatus,
     RecentRequest,
+    RecoveryState,
 )
 from untrusted.agent.command_runner import BoundedCommandRunner
 from untrusted.agent.seed_runner import PlanAction, ScriptedPlanner, SeedRunner
@@ -31,7 +32,7 @@ class FakeBridgeClient:
         self.status_calls += 1
         return BridgeStatusReport(
             service="bridge",
-            stage="stage3_local_seed_agent",
+            stage="stage4_workspace_recovery",
             trusted_state_dir="/var/lib/rsi/trusted_state",
             log_path="/var/lib/rsi/trusted_state/logs/bridge_events.jsonl",
             operational_state_path="/var/lib/rsi/trusted_state/state/operational_state.json",
@@ -54,6 +55,16 @@ class FakeBridgeClient:
                 total_prompt_tokens=3,
                 total_completion_tokens=6,
                 total_tokens=9,
+            ),
+            recovery=RecoveryState(
+                checkpoint_dir="/var/lib/rsi/trusted_state/checkpoints",
+                baseline_id="seed-123456789abc",
+                baseline_source_dir="/app/trusted/recovery/seed_workspace_baseline",
+                baseline_archive_path="/var/lib/rsi/trusted_state/checkpoints/baselines/seed_workspace_baseline.tar.gz",
+                available_checkpoints=[],
+                latest_checkpoint_id=None,
+                latest_action=None,
+                current_workspace_status="seed_baseline",
             ),
             counters={"status_queries": 1, "llm_calls_total": 1},
             recent_requests=[

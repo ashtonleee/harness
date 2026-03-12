@@ -40,6 +40,39 @@ class RecentRequest(BaseModel):
     outcome: str
 
 
+class RecoveryCheckpoint(BaseModel):
+    checkpoint_id: str
+    created_at: str
+    archive_path: str
+    manifest_path: str
+    label: str | None = None
+    workspace_digest: str | None = None
+    file_count: int | None = None
+    size_bytes: int | None = None
+
+
+class RecoveryAction(BaseModel):
+    action: str
+    timestamp: str
+    outcome: str
+    checkpoint_id: str | None = None
+    baseline_id: str | None = None
+    detail: str | None = None
+    request_id: str | None = None
+    trace_id: str | None = None
+
+
+class RecoveryState(BaseModel):
+    checkpoint_dir: str
+    baseline_id: str
+    baseline_source_dir: str
+    baseline_archive_path: str
+    available_checkpoints: list[RecoveryCheckpoint]
+    latest_checkpoint_id: str | None = None
+    latest_action: RecoveryAction | None = None
+    current_workspace_status: str
+
+
 class BridgeStatusReport(BaseModel):
     service: str
     stage: str
@@ -48,6 +81,7 @@ class BridgeStatusReport(BaseModel):
     operational_state_path: str
     connections: dict[str, ConnectionStatus]
     budget: BudgetState
+    recovery: RecoveryState
     counters: dict[str, int]
     recent_requests: list[RecentRequest]
     surfaces: dict[str, str]

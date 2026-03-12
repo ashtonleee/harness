@@ -20,10 +20,11 @@ def test_trusted_state_manager_materializes_operational_state_from_canonical_log
         operational_state_path=state_path,
         budget_total=30,
         budget_unit="mock_tokens",
-        stage="stage3_local_seed_agent",
+        stage="stage4_workspace_recovery",
         surfaces={
             "canonical_logging": "active_canonical_event_log",
             "budgeting": "enforced_token_cap_stage2",
+            "recovery": "trusted_host_checkpoint_controls_stage4",
         },
     )
 
@@ -100,10 +101,11 @@ def test_trusted_state_manager_materializes_operational_state_from_canonical_log
         operational_state_path=state_path,
         budget_total=30,
         budget_unit="mock_tokens",
-        stage="stage3_local_seed_agent",
+        stage="stage4_workspace_recovery",
         surfaces={
             "canonical_logging": "active_canonical_event_log",
             "budgeting": "enforced_token_cap_stage2",
+            "recovery": "trusted_host_checkpoint_controls_stage4",
         },
     )
     assert reloaded.snapshot()["budget"]["spent"] == 11

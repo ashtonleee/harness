@@ -32,6 +32,7 @@ class TrustedStateManager:
         budget_unit: str,
         stage: str,
         surfaces: dict[str, str],
+        recovery_defaults: dict[str, Any] | None = None,
         recent_limit: int = 12,
     ):
         self.canonical_log_path = canonical_log_path
@@ -40,6 +41,7 @@ class TrustedStateManager:
         self.budget_unit = budget_unit
         self.stage = stage
         self.surfaces = dict(surfaces)
+        self.recovery_defaults = json.loads(json.dumps(recovery_defaults or {}))
         self.recent_limit = recent_limit
         self._snapshot = self._initial_snapshot()
         self._rebuild_from_log()
@@ -67,6 +69,8 @@ class TrustedStateManager:
                 "llm_calls_success": 0,
                 "llm_calls_denied": 0,
                 "budget_updates": 0,
+                "checkpoint_events": 0,
+                "recovery_errors": 0,
                 "status_queries": 0,
                 "system_events": 0,
                 "agent_run_events": 0,
@@ -85,11 +89,30 @@ class TrustedStateManager:
                     "checked_at": None,
                 },
             },
+            "recovery": {
+                "checkpoint_dir": self.recovery_defaults.get("checkpoint_dir", ""),
+                "baseline_id": self.recovery_defaults.get("baseline_id", ""),
+                "baseline_source_dir": self.recovery_defaults.get("baseline_source_dir", ""),
+                "baseline_archive_path": self.recovery_defaults.get(
+                    "baseline_archive_path",
+                    "",
+                ),
+                "available_checkpoints": list(
+                    self.recovery_defaults.get("available_checkpoints", [])
+                ),
+                "latest_checkpoint_id": self.recovery_defaults.get("latest_checkpoint_id"),
+                "latest_action": self.recovery_defaults.get("latest_action"),
+                "current_workspace_status": self.recovery_defaults.get(
+                    "current_workspace_status",
+                    "seed_baseline",
+                ),
+            },
             "recent_requests": [],
             "last_event_timestamp": None,
         }
 
-    def _rebuild_from_log(self):
+    def _rebuild_from_log(self, *, write_snapshot: bool = True):
+        self._snapshot = self._initial_snapshot()
         self.canonical_log_path.parent.mkdir(parents=True, exist_ok=True)
         if self.canonical_log_path.exists():
             for raw_line in self.canonical_log_path.read_text(encoding="ascii").splitlines():
@@ -97,7 +120,8 @@ class TrustedStateManager:
                     continue
                 event = json.loads(raw_line)
                 self._apply_event(event)
-        self._write_snapshot()
+        if write_snapshot:
+            self._write_snapshot()
 
     def _merge_connections(self, updates: dict[str, dict[str, Any]]):
         for name, payload in updates.items():
@@ -131,6 +155,41 @@ class TrustedStateManager:
             budget["spent"] = budget_payload.get("spent", budget["spent"])
             budget["remaining"] = budget_payload.get("remaining", budget["remaining"])
             budget["exhausted"] = budget_payload.get("exhausted", budget["exhausted"])
+
+    def _apply_recovery_update(self, summary: dict[str, Any]):
+        recovery_payload = summary.get("recovery", {})
+        if not recovery_payload:
+            return
+
+        recovery = self._snapshot["recovery"]
+        recovery["checkpoint_dir"] = recovery_payload.get(
+            "checkpoint_dir",
+            recovery["checkpoint_dir"],
+        )
+        recovery["baseline_id"] = recovery_payload.get("baseline_id", recovery["baseline_id"])
+        recovery["baseline_source_dir"] = recovery_payload.get(
+            "baseline_source_dir",
+            recovery["baseline_source_dir"],
+        )
+        recovery["baseline_archive_path"] = recovery_payload.get(
+            "baseline_archive_path",
+            recovery["baseline_archive_path"],
+        )
+        recovery["available_checkpoints"] = list(
+            recovery_payload.get("available_checkpoints", recovery["available_checkpoints"])
+        )
+        recovery["latest_checkpoint_id"] = recovery_payload.get(
+            "latest_checkpoint_id",
+            recovery["latest_checkpoint_id"],
+        )
+        recovery["latest_action"] = recovery_payload.get(
+            "latest_action",
+            recovery["latest_action"],
+        )
+        recovery["current_workspace_status"] = recovery_payload.get(
+            "current_workspace_status",
+            recovery["current_workspace_status"],
+        )
 
     def _push_recent_request(self, event: dict[str, Any]):
         recent = self._snapshot["recent_requests"]
@@ -166,6 +225,12 @@ class TrustedStateManager:
         elif event_type == "budget_update":
             self._snapshot["counters"]["budget_updates"] += 1
             self._apply_budget_update(summary)
+        elif event_type in {"checkpoint_created", "checkpoint_restored", "workspace_reset"}:
+            self._snapshot["counters"]["checkpoint_events"] += 1
+            self._apply_recovery_update(summary)
+        elif event_type == "recovery_error":
+            self._snapshot["counters"]["recovery_errors"] += 1
+            self._apply_recovery_update(summary)
         elif event_type == "status_query":
             self._snapshot["counters"]["status_queries"] += 1
         elif event_type == "agent_run":
@@ -193,6 +258,7 @@ class TrustedStateManager:
         outcome: str,
         summary: dict[str, Any],
     ):
+        self._rebuild_from_log(write_snapshot=False)
         event = {
             "timestamp": utc_now_iso(),
             "event_type": event_type,
@@ -212,5 +278,7 @@ class TrustedStateManager:
         self._apply_event(event)
         self._write_snapshot()
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, refresh: bool = False) -> dict[str, Any]:
+        if refresh:
+            self._rebuild_from_log()
         return json.loads(json.dumps(self._snapshot))

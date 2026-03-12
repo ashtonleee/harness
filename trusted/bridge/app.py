@@ -19,8 +19,10 @@ from shared.schemas import (
     EgressProbeReport,
     HealthReport,
     RecentRequest,
+    RecoveryState,
 )
 from trusted.bridge.clients import TrustedBridgeClients
+from trusted.recovery.store import WorkspaceRecoveryStore
 from trusted.state.store import TrustedStateManager, utc_now_iso
 
 
@@ -38,7 +40,7 @@ def build_surfaces() -> dict[str, str]:
         "canonical_logging": "active_canonical_event_log",
         "budgeting": "enforced_token_cap_stage2",
         "seed_agent": "local_only_stage3_substrate",
-        "recovery": "stubbed_for_stage_4",
+        "recovery": "trusted_host_checkpoint_controls_stage4",
         "read_only_web": "stubbed_for_stage_5",
         "browser": "stubbed_for_stage_6",
         "approvals": "stubbed_for_stage_7",
@@ -121,6 +123,7 @@ def make_status_report(snapshot: dict) -> BridgeStatusReport:
             for name, payload in snapshot["connections"].items()
         },
         budget=BudgetState.model_validate(snapshot["budget"]),
+        recovery=RecoveryState.model_validate(snapshot["recovery"]),
         counters={key: int(value) for key, value in snapshot["counters"].items()},
         recent_requests=[
             RecentRequest.model_validate(payload)
@@ -136,6 +139,7 @@ def run_startup_checks(app: FastAPI):
     state_dir.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     settings.state_dir.mkdir(parents=True, exist_ok=True)
+    settings.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     probe_file = state_dir / ".bridge_write_probe"
     probe_file.write_text("ok\n", encoding="ascii")
@@ -143,6 +147,11 @@ def run_startup_checks(app: FastAPI):
 
     app.state.settings = settings
     app.state.surfaces = build_surfaces()
+    app.state.recovery_store = WorkspaceRecoveryStore(
+        recovery_dir=settings.checkpoint_dir,
+        baseline_source_dir=settings.seed_baseline_dir,
+    )
+    app.state.recovery_store.ensure_layout()
     app.state.state_manager = TrustedStateManager(
         canonical_log_path=log_path_for(settings),
         operational_state_path=state_path_for(settings),
@@ -150,6 +159,7 @@ def run_startup_checks(app: FastAPI):
         budget_unit=settings.budget_unit,
         stage=settings.stage,
         surfaces=app.state.surfaces,
+        recovery_defaults=app.state.recovery_store.current_recovery_summary(),
     )
     app.state.clients = TrustedBridgeClients(
         litellm_url=settings.litellm_url,
@@ -160,6 +170,7 @@ def run_startup_checks(app: FastAPI):
         "trusted_state_dir": str(state_dir),
         "log_path": str(app.state.state_manager.canonical_log_path),
         "operational_state_path": str(app.state.state_manager.operational_state_path),
+        "checkpoint_dir": str(settings.checkpoint_dir),
     }
 
 
@@ -227,6 +238,7 @@ async def healthz() -> HealthReport:
 @app.get("/status", response_model=BridgeStatusReport)
 async def status(request: Request, response: Response) -> BridgeStatusReport:
     request_id, trace_id = request_identity()
+    snapshot = app.state.state_manager.snapshot(refresh=True)
     connections = await litellm_connection_payload()
     append_event(
         event_type="status_query",
@@ -241,7 +253,9 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
             "paths": {
                 "canonical_log_path": str(app.state.state_manager.canonical_log_path),
                 "operational_state_path": str(app.state.state_manager.operational_state_path),
+                "checkpoint_dir": str(app.state.settings.checkpoint_dir),
             },
+            "recovery": snapshot["recovery"],
         },
     )
     response.headers.update(make_headers(request_id, trace_id))
@@ -286,7 +300,7 @@ async def chat_completions(
 ) -> ChatCompletionResponse | JSONResponse:
     request_id, trace_id = request_identity()
     actor = caller_actor(request, default="unknown")
-    snapshot = app.state.state_manager.snapshot()
+    snapshot = app.state.state_manager.snapshot(refresh=True)
     estimated_usage = deterministic_usage(payload.messages)
 
     if snapshot["budget"]["remaining"] < estimated_usage.total_tokens:

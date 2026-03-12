@@ -1,8 +1,8 @@
 # rsi-econ
 
-Stage 3 only: minimal local-only seed agent substrate on top of the validated Stage 1/2 boundary and canonical trusted state.
+Stage 4 only: trusted workspace recovery and rollback on top of the validated Stage 1/2 boundary, canonical trusted state, and the local-only seed agent substrate.
 
-This repo does not implement public-web proxying, browser automation, approvals, recovery, or consequential actions yet. It now proves the boundary, the trusted-side control plane, and a minimal local-only seed-agent loop:
+This repo does not implement public-web proxying, browser automation, approvals, consequential actions, or operator auth on the bridge yet. It now proves the boundary, the trusted-side control plane, the local-only seed-agent loop, and trusted host-side recovery for `/workspace/agent`:
 
 - the untrusted agent only sits on an internal Docker network
 - the bridge is the only cross-network hop
@@ -14,6 +14,7 @@ This repo does not implement public-web proxying, browser automation, approvals,
 - `/workspace/agent` is the only mutable seed repo/workspace
 - `/app/untrusted` stays static runtime/harness code
 - the seed runner can use bridge status, bridge chat, local workspace file tools, and a bounded local Python command runner
+- trusted checkpoints and reset/restore controls live outside the mutable workspace under `runtime/trusted_state/checkpoints/`
 
 ## Install
 
@@ -29,7 +30,7 @@ pip install -e ".[dev]"
 ./scripts/test.sh
 ```
 
-That command is the primary verification path for Stage 3. It requires the Docker daemon because the boundary proof, trusted-state proof, and seed-runner proof are all container-backed.
+That command is the primary verification path for Stage 4. It requires the Docker daemon because the boundary proof, trusted-state proof, seed-runner proof, and recovery proof are all container-backed.
 
 ## Docker Workflow
 
@@ -93,6 +94,30 @@ Inspect the materialized operational state snapshot:
 python -m json.tool runtime/trusted_state/state/operational_state.json
 ```
 
+List trusted checkpoints from the operator side:
+
+```bash
+./scripts/recovery.sh list-checkpoints
+```
+
+Create a trusted checkpoint of the mutable workspace:
+
+```bash
+./scripts/recovery.sh create-checkpoint --label "before-local-edit"
+```
+
+Restore a trusted checkpoint by ID:
+
+```bash
+./scripts/recovery.sh restore-checkpoint ckpt-...
+```
+
+Reset the mutable workspace back to the trusted seed baseline:
+
+```bash
+./scripts/recovery.sh reset-workspace-to-seed-baseline
+```
+
 Inspect the mutable seed workspace on the host:
 
 ```bash
@@ -107,7 +132,7 @@ Tear the stack down:
 
 ## Host-Process Dev Fallback
 
-This mode is for lightweight app debugging only. It is not the Stage 3 trust proof path.
+This mode is for lightweight app debugging only. It is not the Stage 4 trust proof path.
 
 Run LiteLLM in one shell:
 
@@ -155,14 +180,24 @@ Trusted state persists across bridge restarts because `runtime/trusted_state/` i
 ```bash
 rm -f runtime/trusted_state/logs/bridge_events.jsonl
 rm -f runtime/trusted_state/state/operational_state.json
+rm -rf runtime/trusted_state/checkpoints
 ```
+
+## Stage 4 Recovery Model
+
+- Trusted recovery state lives under `runtime/trusted_state/checkpoints/`.
+- The trusted seed baseline lives under `trusted/recovery/seed_workspace_baseline/`.
+- `reset-workspace-to-seed-baseline` means rewrite `untrusted/agent_workspace/` to exactly the trusted seed baseline tree.
+- Checkpoint creation, restore, and reset are host-side operator controls only. There are no mutating recovery bridge routes in Stage 4.
+- Recovery actions are canonical trusted events with durable request IDs and trace IDs.
+- Bridge `/status` exposes read-only recovery state derived from the canonical log and the trusted checkpoint store.
 
 ## Stage Boundary
 
 - Trusted code lives under `trusted/`.
 - Static untrusted runtime code lives under `untrusted/agent/`.
 - The mutable seed repo/workspace lives under `untrusted/agent_workspace/`.
-- Trusted runtime state, canonical events, and materialized operational state live under `runtime/trusted_state/`.
+- Trusted runtime state, canonical events, materialized operational state, and checkpoints live under `runtime/trusted_state/`.
 - The agent service mounts only `untrusted/agent_workspace/`.
 - The agent is on `agent_net` only.
 - LiteLLM is on `trusted_net` only.
