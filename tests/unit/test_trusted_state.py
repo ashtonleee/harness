@@ -175,3 +175,85 @@ def test_trusted_state_manager_materializes_web_fetch_state(tmp_path):
     assert snapshot["web"]["counters"]["web_fetch_success"] == 1
     assert snapshot["web"]["recent_fetches"][0]["host"] == "example.com"
     assert snapshot["web"]["recent_fetches"][0]["request_id"] == "req-fetch"
+
+
+def test_trusted_state_manager_materializes_browser_render_state(tmp_path):
+    log_path = tmp_path / "logs" / "bridge_events.jsonl"
+    state_path = tmp_path / "state" / "operational_state.json"
+    manager = TrustedStateManager(
+        canonical_log_path=log_path,
+        operational_state_path=state_path,
+        budget_total=30,
+        budget_unit="mock_tokens",
+        stage="stage6_read_only_browser",
+        surfaces={
+            "canonical_logging": "active_canonical_event_log",
+            "budgeting": "enforced_token_cap_stage2",
+            "recovery": "trusted_host_checkpoint_controls_stage4",
+            "read_only_web": "trusted_fetcher_stage5_read_only_get",
+            "browser": "trusted_browser_stage6a_read_only_render",
+        },
+        web_defaults={
+            "allowlist_hosts": ["example.com"],
+            "private_test_hosts": [],
+            "allowed_content_types": ["text/plain", "text/html"],
+            "caps": {
+                "max_redirects": 3,
+                "max_response_bytes": 32768,
+                "max_preview_chars": 1024,
+                "timeout_seconds": 5.0,
+            },
+            "fetcher": {
+                "url": "http://fetcher:8082",
+                "reachable": True,
+                "detail": None,
+                "checked_at": "2026-03-12T00:00:00+00:00",
+            },
+        },
+        browser_defaults={
+            "service": {
+                "url": "http://browser:8083",
+                "reachable": False,
+                "detail": "not_checked_yet",
+                "checked_at": None,
+            },
+            "caps": {
+                "viewport_width": 1280,
+                "viewport_height": 720,
+                "timeout_seconds": 10.0,
+                "settle_time_ms": 500,
+                "max_rendered_text_bytes": 16384,
+                "max_screenshot_bytes": 1048576,
+            },
+        },
+    )
+
+    manager.append_event(
+        event_type="browser_render",
+        actor="agent",
+        source_service="bridge",
+        request_id="req-browser",
+        trace_id="trace-browser",
+        outcome="success",
+        summary={
+            "normalized_url": "https://example.com/",
+            "final_url": "https://example.com/",
+            "host": "example.com",
+            "allowlist_decision": "allowed",
+            "redirect_chain": [],
+            "observed_hosts": ["example.com"],
+            "resolved_ips": ["93.184.216.34"],
+            "http_status": 200,
+            "page_title": "Example Domain",
+            "text_bytes": 120,
+            "text_truncated": False,
+            "screenshot_bytes": 512,
+            "screenshot_sha256": "image-hash",
+        },
+    )
+
+    snapshot = manager.snapshot()
+    assert snapshot["browser"]["counters"]["browser_render_total"] == 1
+    assert snapshot["browser"]["counters"]["browser_render_success"] == 1
+    assert snapshot["browser"]["recent_renders"][0]["request_id"] == "req-browser"
+    assert snapshot["browser"]["recent_renders"][0]["page_title"] == "Example Domain"

@@ -103,6 +103,33 @@ def test_workspace_recovery_store_rejects_invalid_checkpoint_id(tmp_path):
         store.restore_checkpoint("missing-checkpoint")
 
 
+def test_workspace_recovery_store_rewrites_baseline_manifest_when_paths_drift(tmp_path):
+    baseline_dir = tmp_path / "baseline"
+    workspace_dir = tmp_path / "workspace"
+    recovery_dir = tmp_path / "trusted_state" / "checkpoints"
+    write_tree(baseline_dir, {"seedlib.py": "x = 1\n"})
+    write_tree(workspace_dir, {"seedlib.py": "x = 1\n"})
+
+    store = WorkspaceRecoveryStore(
+        workspace_dir=workspace_dir,
+        recovery_dir=recovery_dir,
+        baseline_source_dir=baseline_dir,
+    )
+    layout = store.ensure_layout()
+    manifest_path = Path(layout["baseline"]["manifest_path"])
+    stale_manifest = dict(layout["baseline"])
+    stale_manifest["archive_path"] = "/var/lib/rsi/trusted_state/checkpoints/baselines/seed_workspace_baseline.tar.gz"
+    stale_manifest["manifest_path"] = "/var/lib/rsi/trusted_state/checkpoints/baselines/seed_workspace_baseline.json"
+    stale_manifest["baseline_source_dir"] = "/app/trusted/recovery/seed_workspace_baseline"
+    manifest_path.write_text(json.dumps(stale_manifest) + "\n", encoding="ascii")
+
+    refreshed = store.ensure_layout()
+    assert refreshed["baseline"]["archive_path"] == str(
+        recovery_dir / "baselines" / "seed_workspace_baseline.tar.gz"
+    )
+    assert refreshed["baseline"]["baseline_source_dir"] == str(baseline_dir)
+
+
 def test_trusted_state_manager_materializes_recovery_events(tmp_path):
     log_path = tmp_path / "logs" / "bridge_events.jsonl"
     state_path = tmp_path / "state" / "operational_state.json"

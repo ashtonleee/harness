@@ -12,10 +12,11 @@ def test_bridge_health_contract(monkeypatch, tmp_path):
     body = response.json()
     assert body["service"] == "bridge"
     assert body["status"] == "ok"
-    assert body["stage"] == "stage5_read_only_web"
+    assert body["stage"] == "stage6_read_only_browser"
     assert body["details"]["trusted_state_ready"] is True
     assert "litellm_reachable" in body["details"]
     assert "fetcher_reachable" in body["details"]
+    assert "browser_reachable" in body["details"]
     assert body["details"]["log_path"].endswith("bridge_events.jsonl")
 
 
@@ -33,11 +34,13 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert body["surfaces"]["seed_agent"] == "local_only_stage3_substrate"
     assert body["surfaces"]["recovery"] == "trusted_host_checkpoint_controls_stage4"
     assert body["surfaces"]["read_only_web"] == "trusted_fetcher_stage5_read_only_get"
+    assert body["surfaces"]["browser"] == "trusted_browser_stage6a_read_only_render"
     assert body["surfaces"]["approvals"] == "stubbed_for_stage_7"
     assert body["log_path"].endswith("bridge_events.jsonl")
     assert body["operational_state_path"].endswith("operational_state.json")
     assert body["connections"]["litellm"]["url"].startswith("http://")
     assert body["connections"]["fetcher"]["url"].startswith("http://")
+    assert body["connections"]["browser"]["url"].startswith("http://")
     assert body["budget"]["unit"] == "mock_tokens"
     assert body["budget"]["remaining"] == body["budget"]["total"]
     assert body["recovery"]["baseline_id"]
@@ -46,6 +49,9 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert body["web"]["allowlist_hosts"] == ["example.com"]
     assert body["web"]["fetcher"]["url"].startswith("http://")
     assert body["web"]["caps"]["max_redirects"] >= 1
+    assert body["browser"]["service"]["url"].startswith("http://")
+    assert body["browser"]["caps"]["viewport_width"] == 1280
+    assert body["browser"]["counters"]["browser_render_total"] == 0
     assert isinstance(body["recent_requests"], list)
 
 

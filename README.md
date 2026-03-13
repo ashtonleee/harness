@@ -1,8 +1,8 @@
 # rsi-econ
 
-Stage 5 only: trusted read-only web mediation on top of the validated Stage 1-4 boundary, canonical trusted state, recovery, and the local-only seed agent substrate.
+Stage 6A only: trusted read-only browser mediation on top of the validated Stage 1-5 boundary, canonical trusted state, recovery, and the local-only seed agent substrate.
 
-This repo does not implement browser automation, JS execution, sessions/logins, approvals, consequential actions, or operator auth on the bridge yet. It now proves:
+This repo does not implement clicks, link-following, forms, logins, cookies/sessions, downloads/uploads, approvals, consequential actions, or operator auth on the bridge yet. It now proves:
 
 - the untrusted agent only sits on an internal Docker network
 - the bridge is the only cross-network hop
@@ -17,6 +17,8 @@ This repo does not implement browser automation, JS execution, sessions/logins, 
 - trusted checkpoints and reset/restore controls live outside the mutable workspace under `runtime/trusted_state/checkpoints/`
 - read-only web fetches go only through `agent -> bridge -> fetcher -> egress_net`
 - the fetch route is fixed to remote `GET` only with an explicit host allowlist, text-only content policy, redirect caps, byte caps, and canonical trusted fetch logging
+- read-only browser renders go only through `agent -> bridge -> browser -> egress_net`
+- the browser route is fixed to a `url`-only request shape with allowlisted navigation, rendered text extraction, page title/metadata extraction, one screenshot, and canonical trusted browser metadata logging
 
 ## Install
 
@@ -32,7 +34,7 @@ pip install -e ".[dev]"
 ./scripts/test.sh
 ```
 
-That command is the primary verification path for Stage 5. It requires the Docker daemon because the boundary proof, trusted-state proof, recovery proof, seed-runner proof, and mediated web-fetch proof are all container-backed.
+That command is the primary verification path for Stage 6A. It requires the Docker daemon because the boundary proof, trusted-state proof, recovery proof, seed-runner proof, mediated web-fetch proof, and mediated browser proof are all container-backed.
 
 ## Docker Workflow
 
@@ -40,6 +42,12 @@ Bring up the stack:
 
 ```bash
 ./scripts/up.sh
+```
+
+Bring up the deterministic fixture-backed browser demo stack:
+
+```bash
+RSI_WEB_ALLOWLIST_HOSTS=allowed.test RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS=allowed.test ./scripts/up.sh
 ```
 
 Inspect bridge health inside the trusted bridge container:
@@ -72,6 +80,14 @@ Fetch an allowlisted page through the trusted web path:
 docker compose exec agent python -m untrusted.agent.bridge_client fetch --url http://example.com/
 ```
 
+Render an allowlisted page through the trusted browser path:
+
+```bash
+docker compose exec agent python -m untrusted.agent.bridge_client browser-render --url http://allowed.test/browser/rendered
+```
+
+That browser command assumes the stack was started with `RSI_WEB_ALLOWLIST_HOSTS=allowed.test` and `RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS=allowed.test` so the deterministic fixture page is allowlisted.
+
 Run the one-shot local-only seed runner inside the untrusted sandbox:
 
 ```bash
@@ -84,7 +100,7 @@ Run the deterministic scripted Stage 3 plan used by the integration test:
 docker compose exec agent python -m untrusted.agent.seed_runner --task "write a local-only run report" --planner scripted --script .seed_plans/stage3_local_task.json
 ```
 
-Run the human-visible Stage 5 demo artifact path:
+Run the human-visible Stage 5 fetch demo artifact path:
 
 ```bash
 docker compose exec agent python -m untrusted.agent.seed_runner --task "fetch one allowed public page and write a report" --planner scripted --script .seed_plans/stage5_demo_fetch.json
@@ -96,10 +112,26 @@ Inspect the demo report artifact:
 cat untrusted/agent_workspace/reports/stage5_web_fetch_report.txt
 ```
 
+Run the human-visible Stage 6A browser demo artifact path:
+
+```bash
+docker compose exec agent python -m untrusted.agent.seed_runner --task "render one allowed page and write a browser report" --planner scripted --script .seed_plans/stage6_browser_demo.json
+```
+
+Inspect the Stage 6A browser report and screenshot:
+
+```bash
+cat untrusted/agent_workspace/reports/stage6_browser_report.md
+```
+
+```bash
+file untrusted/agent_workspace/reports/stage6_browser_screenshot.png
+```
+
 Tail trusted service logs:
 
 ```bash
-docker compose logs -f bridge litellm
+docker compose logs -f bridge browser fetcher litellm
 ```
 
 Tail the canonical append-only event log:
@@ -114,7 +146,13 @@ Inspect only the canonical Stage 5 fetch events:
 rg '"event_type": "web_fetch|web_fetch_denied|web_fetch_error"' runtime/trusted_state/logs/bridge_events.jsonl
 ```
 
-Inspect the materialized operational state snapshot, including the new `web` section:
+Inspect only the canonical Stage 6A browser events:
+
+```bash
+rg '"event_type": "browser_render|browser_render_denied|browser_render_error"' runtime/trusted_state/logs/bridge_events.jsonl
+```
+
+Inspect the materialized operational state snapshot, including the `web` and `browser` sections:
 
 ```bash
 python -m json.tool runtime/trusted_state/state/operational_state.json
@@ -158,7 +196,7 @@ Tear the stack down:
 
 ## Host-Process Dev Fallback
 
-This mode is for lightweight app debugging only. It is not the Stage 5 trust proof path.
+This mode is for lightweight app debugging only. It is not the Stage 6A trust proof path.
 
 Run LiteLLM in one shell:
 
@@ -229,6 +267,17 @@ rm -rf runtime/trusted_state/checkpoints
 - Forbidden in Stage 5: non-HTTP(S), fragments, userinfo, arbitrary ports, cookies, sessions, auth headers, binary/media downloads, and browser/JS behavior.
 - Canonical fetch events record trusted-observed metadata only. Raw fetched bodies stay out of canonical trusted state.
 
+## Stage 6A Browser Model
+
+- New topology edge: `browser` is a separate trusted service on `trusted_net` + `egress_net`.
+- `bridge` stays off `egress_net`; it calls `browser` over `trusted_net`.
+- `agent` stays on `agent_net` only and still has no direct public/provider/LiteLLM/fetcher/browser path.
+- The bridge exposes one new safe route: `POST /web/browser/render`.
+- Browser requests are fixed to `url` only.
+- Allowed in Stage 6A: allowlisted navigation, rendered text extraction, page title extraction, small metadata extraction, and one screenshot.
+- Forbidden in Stage 6A: clicks, link-following, forms, logins, cookies/sessions, uploads/downloads, arbitrary waits, arbitrary selectors, and agent-supplied JS.
+- Canonical browser events record trusted-observed metadata and hashes only. Raw rendered text and screenshot bytes stay out of canonical trusted state.
+
 ## Stage Boundary
 
 - Trusted code lives under `trusted/`.
@@ -240,6 +289,7 @@ rm -rf runtime/trusted_state/checkpoints
 - LiteLLM is on `trusted_net` only.
 - The bridge is on `agent_net` + `trusted_net`.
 - The fetcher is on `trusted_net` + `egress_net`.
+- The browser is on `trusted_net` + `egress_net`.
 - The web fixture used by deterministic tests is on `egress_net` only.
 
 See `REPO_LAYOUT.md`, `TASK_GRAPH.md`, and `ACCEPTANCE_TEST_MATRIX.md` for the current stage contract.
