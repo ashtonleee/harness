@@ -1,3 +1,4 @@
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,4 +62,14 @@ class WorkspaceTools:
         return {
             "path": _relative_string(resolved, self.workspace_dir),
             "bytes_written": len(content.encode("utf-8")),
+        }
+
+    def write_binary_base64(self, path: str, base64_data: str) -> dict:
+        resolved = self.resolve_path(path)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        raw = base64.b64decode(base64_data, validate=True)
+        resolved.write_bytes(raw)
+        return {
+            "path": _relative_string(resolved, self.workspace_dir),
+            "bytes_written": len(raw),
         }

@@ -14,6 +14,7 @@ services:
       RSI_TRUSTED_STATE_DIR: /var/lib/rsi/trusted_state
       RSI_LITELLM_URL: http://litellm:4000
       RSI_FETCHER_URL: http://fetcher:8082
+      RSI_BROWSER_URL: http://browser:8083
       RSI_AGENT_URL: http://agent:8001
       RSI_LLM_BUDGET_TOKEN_CAP: ${RSI_LLM_BUDGET_TOKEN_CAP:-100}
       RSI_BUDGET_UNIT: mock_tokens
@@ -27,6 +28,8 @@ services:
       litellm:
         condition: service_healthy
       fetcher:
+        condition: service_healthy
+      browser:
         condition: service_healthy
     healthcheck:
       test:
@@ -91,6 +94,43 @@ services:
         - python
         - -c
         - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/healthz", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - trusted_net
+      - egress_net
+
+  browser:
+    build:
+      context: .
+      dockerfile: trusted/browser/Dockerfile
+    command:
+      - uvicorn
+      - trusted.browser.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8083"
+    environment:
+      RSI_BROWSER_URL: http://browser:8083
+      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
+      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
+      RSI_BROWSER_VIEWPORT_WIDTH: ${RSI_BROWSER_VIEWPORT_WIDTH:-1280}
+      RSI_BROWSER_VIEWPORT_HEIGHT: ${RSI_BROWSER_VIEWPORT_HEIGHT:-720}
+      RSI_BROWSER_TIMEOUT_SECONDS: ${RSI_BROWSER_TIMEOUT_SECONDS:-10}
+      RSI_BROWSER_SETTLE_TIME_MS: ${RSI_BROWSER_SETTLE_TIME_MS:-500}
+      RSI_BROWSER_MAX_RENDERED_TEXT_BYTES: ${RSI_BROWSER_MAX_RENDERED_TEXT_BYTES:-16384}
+      RSI_BROWSER_MAX_SCREENSHOT_BYTES: ${RSI_BROWSER_MAX_SCREENSHOT_BYTES:-1048576}
+    depends_on:
+      webfixture:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8083/healthz", timeout=2).read()
       interval: 5s
       timeout: 3s
       retries: 10

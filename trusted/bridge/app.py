@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -11,6 +13,9 @@ from shared.mock_llm import MINIMUM_DETERMINISTIC_CALL_TOKENS, deterministic_usa
 from shared.schemas import (
     AgentRunEventReceipt,
     AgentRunEventRequest,
+    BrowserRenderRequest,
+    BrowserRenderResponse,
+    BrowserState,
     BridgeStatusReport,
     BudgetState,
     ChatCompletionRequest,
@@ -30,6 +35,14 @@ from trusted.recovery.store import WorkspaceRecoveryStore
 from trusted.state.store import TrustedStateManager, utc_now_iso
 
 
+DEBUG_PROBES_ENABLED = os.environ.get("RSI_ENABLE_DEBUG_PROBES", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
 def log_path_for(settings) -> Path:
     return settings.log_dir / "bridge_events.jsonl"
 
@@ -46,7 +59,7 @@ def build_surfaces() -> dict[str, str]:
         "seed_agent": "local_only_stage3_substrate",
         "recovery": "trusted_host_checkpoint_controls_stage4",
         "read_only_web": "trusted_fetcher_stage5_read_only_get",
-        "browser": "stubbed_for_stage_6",
+        "browser": "trusted_browser_stage6a_read_only_render",
         "approvals": "stubbed_for_stage_7",
         "consequential_actions": "stubbed_for_stage_8",
     }
@@ -99,6 +112,7 @@ def request_identity() -> tuple[str, str]:
 async def trusted_connections_payload() -> dict[str, dict]:
     reachable, detail = await app.state.clients.litellm_health()
     fetcher_reachable, fetcher_detail = await app.state.clients.fetcher_health()
+    browser_reachable, browser_detail = await app.state.clients.browser_health()
     checked_at = utc_now_iso()
     return {
         "bridge": {
@@ -119,6 +133,12 @@ async def trusted_connections_payload() -> dict[str, dict]:
             "detail": fetcher_detail,
             "checked_at": checked_at,
         },
+        "browser": {
+            "url": app.state.settings.browser_url,
+            "reachable": browser_reachable,
+            "detail": browser_detail,
+            "checked_at": checked_at,
+        },
     }
 
 
@@ -136,6 +156,7 @@ def make_status_report(snapshot: dict) -> BridgeStatusReport:
         budget=BudgetState.model_validate(snapshot["budget"]),
         recovery=RecoveryState.model_validate(snapshot["recovery"]),
         web=WebState.model_validate(snapshot["web"]),
+        browser=BrowserState.model_validate(snapshot["browser"]),
         counters={key: int(value) for key, value in snapshot["counters"].items()},
         recent_requests=[
             RecentRequest.model_validate(payload)
@@ -161,6 +182,25 @@ def web_defaults_for(settings) -> dict:
             "max_response_bytes": settings.web_max_response_bytes,
             "max_preview_chars": settings.web_max_preview_chars,
             "timeout_seconds": settings.web_timeout_seconds,
+        },
+    }
+
+
+def browser_defaults_for(settings) -> dict:
+    return {
+        "service": {
+            "url": settings.browser_url,
+            "reachable": False,
+            "detail": "not_checked_yet",
+            "checked_at": None,
+        },
+        "caps": {
+            "viewport_width": settings.browser_viewport_width,
+            "viewport_height": settings.browser_viewport_height,
+            "timeout_seconds": settings.browser_timeout_seconds,
+            "settle_time_ms": settings.browser_settle_time_ms,
+            "max_rendered_text_bytes": settings.browser_max_rendered_text_bytes,
+            "max_screenshot_bytes": settings.browser_max_screenshot_bytes,
         },
     }
 
@@ -193,10 +233,12 @@ def run_startup_checks(app: FastAPI):
         surfaces=app.state.surfaces,
         recovery_defaults=app.state.recovery_store.current_recovery_summary(),
         web_defaults=web_defaults_for(settings),
+        browser_defaults=browser_defaults_for(settings),
     )
     app.state.clients = TrustedBridgeClients(
         litellm_url=settings.litellm_url,
         fetcher_url=settings.fetcher_url,
+        browser_url=settings.browser_url,
         agent_url=settings.agent_url,
     )
     app.state.startup_checks = {
@@ -206,6 +248,7 @@ def run_startup_checks(app: FastAPI):
         "operational_state_path": str(app.state.state_manager.operational_state_path),
         "checkpoint_dir": str(settings.checkpoint_dir),
         "fetcher_url": settings.fetcher_url,
+        "browser_url": settings.browser_url,
     }
 
 
@@ -248,6 +291,7 @@ async def lifespan(app: FastAPI):
             "surfaces": dict(app.state.surfaces),
             "connections": await trusted_connections_payload(),
             "web": web_defaults_for(app.state.settings),
+            "browser": browser_defaults_for(app.state.settings),
         },
     )
     yield
@@ -269,6 +313,8 @@ async def healthz() -> HealthReport:
             "litellm_detail": connections["litellm"]["detail"],
             "fetcher_reachable": connections["fetcher"]["reachable"],
             "fetcher_detail": connections["fetcher"]["detail"],
+            "browser_reachable": connections["browser"]["reachable"],
+            "browser_detail": connections["browser"]["detail"],
         },
     )
 
@@ -280,6 +326,8 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
     connections = await trusted_connections_payload()
     status_web = dict(snapshot["web"])
     status_web["fetcher"] = connections["fetcher"]
+    status_browser = dict(snapshot["browser"])
+    status_browser["service"] = connections["browser"]
     append_event(
         event_type="status_query",
         actor=caller_actor(request, default="operator"),
@@ -297,6 +345,7 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
             },
             "recovery": snapshot["recovery"],
             "web": status_web,
+            "browser": status_browser,
         },
     )
     response.headers.update(make_headers(request_id, trace_id))
@@ -511,6 +560,52 @@ def web_error_summary(detail: dict) -> dict:
     }
 
 
+def browser_event_summary(render_result, *, outcome: str, reason: str | None = None) -> dict:
+    host = urlsplit(render_result.normalized_url).hostname or ""
+    summary = {
+        "normalized_url": render_result.normalized_url,
+        "final_url": render_result.final_url,
+        "host": host,
+        "allowlist_decision": "allowed" if outcome == "success" else "denied",
+        "redirect_chain": list(render_result.redirect_chain),
+        "observed_hosts": list(render_result.observed_hosts),
+        "resolved_ips": list(render_result.resolved_ips),
+        "http_status": render_result.http_status,
+        "page_title": render_result.page_title,
+        "meta_description": render_result.meta_description,
+        "rendered_text_sha256": render_result.rendered_text_sha256,
+        "text_bytes": render_result.text_bytes,
+        "text_truncated": render_result.text_truncated,
+        "screenshot_sha256": render_result.screenshot_sha256,
+        "screenshot_bytes": render_result.screenshot_bytes,
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+def browser_error_summary(detail: dict) -> dict:
+    host = urlsplit(detail.get("normalized_url", "")).hostname or detail.get("host", "")
+    return {
+        "normalized_url": detail.get("normalized_url", ""),
+        "final_url": detail.get("final_url", detail.get("normalized_url", "")),
+        "host": host,
+        "allowlist_decision": detail.get("allowlist_decision", "denied"),
+        "redirect_chain": list(detail.get("redirect_chain", [])),
+        "observed_hosts": list(detail.get("observed_hosts", [])),
+        "resolved_ips": list(detail.get("resolved_ips", [])),
+        "http_status": detail.get("http_status"),
+        "page_title": detail.get("page_title", ""),
+        "meta_description": detail.get("meta_description", ""),
+        "rendered_text_sha256": detail.get("rendered_text_sha256", ""),
+        "text_bytes": int(detail.get("text_bytes", 0)),
+        "text_truncated": bool(detail.get("text_truncated", False)),
+        "screenshot_sha256": detail.get("screenshot_sha256", ""),
+        "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "reason": detail.get("reason", detail.get("detail", "browser_render_failed")),
+    }
+
+
 @app.post("/web/fetch", response_model=WebFetchResponse)
 async def bridge_fetch(
     payload: WebFetchRequest,
@@ -593,6 +688,90 @@ async def bridge_fetch(
     )
 
 
+@app.post("/web/browser/render", response_model=BrowserRenderResponse)
+async def bridge_browser_render(
+    payload: BrowserRenderRequest,
+    request: Request,
+    response: Response,
+) -> BrowserRenderResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    actor = caller_actor(request, default="agent")
+
+    try:
+        render_result = await app.state.clients.browser_render(payload)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.json()
+        status_code = exc.response.status_code
+        event_type = "browser_render_denied" if status_code in {400, 403, 413} else "browser_render_error"
+        append_event(
+            event_type=event_type,
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="denied" if event_type == "browser_render_denied" else "error",
+            summary=browser_error_summary(detail),
+        )
+        return JSONResponse(
+            status_code=status_code,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                **detail,
+            },
+        )
+    except httpx.HTTPError as exc:
+        append_event(
+            event_type="browser_render_error",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="error",
+            summary={
+                "normalized_url": payload.url,
+                "final_url": payload.url,
+                "host": urlsplit(payload.url).hostname or "",
+                "allowlist_decision": "unknown",
+                "redirect_chain": [],
+                "observed_hosts": [],
+                "resolved_ips": [],
+                "http_status": None,
+                "page_title": "",
+                "meta_description": "",
+                "rendered_text_sha256": "",
+                "text_bytes": 0,
+                "text_truncated": False,
+                "screenshot_sha256": "",
+                "screenshot_bytes": 0,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return JSONResponse(
+            status_code=502,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    append_event(
+        event_type="browser_render",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary=browser_event_summary(render_result, outcome="success"),
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserRenderResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **render_result.model_dump(),
+    )
+
+
 async def run_probe(probe_kind: str) -> EgressProbeReport | JSONResponse:
     request_id, trace_id = request_identity()
 
@@ -659,27 +838,25 @@ async def run_probe(probe_kind: str) -> EgressProbeReport | JSONResponse:
     )
 
 
-@app.post("/debug/probes/public-egress", response_model=EgressProbeReport)
-async def public_egress_probe(
-    response: Response,
-) -> EgressProbeReport | JSONResponse:
-    if not app.state.settings.enable_debug_probes:
-        raise HTTPException(status_code=404, detail="debug probes disabled")
-    result = await run_probe("public")
-    if isinstance(result, JSONResponse):
+if DEBUG_PROBES_ENABLED:
+
+    @app.post("/debug/probes/public-egress", response_model=EgressProbeReport)
+    async def public_egress_probe(
+        response: Response,
+    ) -> EgressProbeReport | JSONResponse:
+        result = await run_probe("public")
+        if isinstance(result, JSONResponse):
+            return result
+        response.headers.update(make_headers(result.request_id, result.trace_id))
         return result
-    response.headers.update(make_headers(result.request_id, result.trace_id))
-    return result
 
 
-@app.post("/debug/probes/provider-egress", response_model=EgressProbeReport)
-async def provider_egress_probe(
-    response: Response,
-) -> EgressProbeReport | JSONResponse:
-    if not app.state.settings.enable_debug_probes:
-        raise HTTPException(status_code=404, detail="debug probes disabled")
-    result = await run_probe("provider")
-    if isinstance(result, JSONResponse):
+    @app.post("/debug/probes/provider-egress", response_model=EgressProbeReport)
+    async def provider_egress_probe(
+        response: Response,
+    ) -> EgressProbeReport | JSONResponse:
+        result = await run_probe("provider")
+        if isinstance(result, JSONResponse):
+            return result
+        response.headers.update(make_headers(result.request_id, result.trace_id))
         return result
-    response.headers.update(make_headers(result.request_id, result.trace_id))
-    return result

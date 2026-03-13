@@ -7,27 +7,27 @@ from fastapi import FastAPI, HTTPException
 
 from shared.config import fetcher_settings
 from shared.schemas import FetcherFetchResponse, HealthReport, WebFetchRequest
-from trusted.fetcher.policy import (
-    FetchPolicy,
-    FetchPolicyError,
-    content_type_allowed,
-    normalize_fetch_target,
-    normalize_redirect_target,
+from trusted.web.policy import (
+    WebPolicy,
+    WebPolicyError,
+    normalize_web_redirect_target,
+    normalize_web_target,
     resolve_target_ips,
     validate_resolved_ips,
+    web_policy_status_code,
 )
 
 
-def build_policy() -> FetchPolicy:
+def build_policy() -> WebPolicy:
     settings = fetcher_settings()
-    return FetchPolicy(
+    return WebPolicy(
         allowlist_hosts=settings.allowlist_hosts,
         private_test_hosts=settings.private_test_hosts,
+        max_redirects=settings.max_redirects,
+        timeout_seconds=settings.timeout_seconds,
         allowed_content_types=settings.allowed_content_types,
         max_response_bytes=settings.max_response_bytes,
         max_preview_chars=settings.max_preview_chars,
-        max_redirects=settings.max_redirects,
-        timeout_seconds=settings.timeout_seconds,
         user_agent=settings.user_agent,
         enable_private_test_hosts=settings.enable_private_test_hosts,
     )
@@ -57,17 +57,9 @@ def _used_ip(response: httpx.Response) -> str | None:
     return str(server_addr)
 
 
-def _policy_status_code(reason: str) -> int:
-    if reason in {
-        "unsupported_scheme",
-        "userinfo_not_allowed",
-        "fragment_not_allowed",
-        "missing_hostname",
-        "port_not_allowed",
-        "empty_url",
-    }:
-        return 400
-    return 403
+def _content_type_allowed(content_type: str, *, allowed_content_types: tuple[str, ...]) -> bool:
+    value = content_type.split(";", 1)[0].strip().lower()
+    return value in allowed_content_types
 
 
 async def _read_limited_body(response: httpx.Response, limit: int) -> tuple[bytes, bool]:
@@ -87,11 +79,12 @@ async def _read_limited_body(response: httpx.Response, limit: int) -> tuple[byte
 
 async def execute_fetch(url: str) -> FetcherFetchResponse:
     policy = app.state.policy
+    settings = app.state.settings
     try:
-        current = normalize_fetch_target(url, policy)
-    except FetchPolicyError as exc:
+        current = normalize_web_target(url, policy)
+    except WebPolicyError as exc:
         raise HTTPException(
-            status_code=_policy_status_code(exc.reason),
+            status_code=web_policy_status_code(exc.reason),
             detail={
                 "reason": exc.reason,
                 "detail": exc.detail,
@@ -112,8 +105,8 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
         for _ in range(policy.max_redirects + 1):
             resolved_ips = validate_resolved_ips(current, resolve_target_ips(current), policy)
             headers = {
-                "User-Agent": policy.user_agent,
-                "Accept": ", ".join(policy.allowed_content_types),
+                "User-Agent": settings.user_agent,
+                "Accept": ", ".join(settings.allowed_content_types),
             }
             try:
                 async with client.stream("GET", current.normalized_url, headers=headers) as response:
@@ -123,8 +116,8 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
                     if status in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location", "").strip()
                         if not location:
-                            raise FetchPolicyError("redirect_missing_location", current.normalized_url)
-                        current = normalize_redirect_target(
+                            raise WebPolicyError("redirect_missing_location", current.normalized_url)
+                        current = normalize_web_redirect_target(
                             location,
                             current_url=current.normalized_url,
                             policy=policy,
@@ -143,7 +136,10 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
                                 "redirect_chain": redirect_chain,
                             },
                         )
-                    if not content_type_allowed(raw_content_type, policy):
+                    if not _content_type_allowed(
+                        raw_content_type,
+                        allowed_content_types=settings.allowed_content_types,
+                    ):
                         raise HTTPException(
                             status_code=415,
                             detail={
@@ -155,11 +151,14 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
                                 "redirect_chain": redirect_chain,
                             },
                         )
-                    body, truncated = await _read_limited_body(response, policy.max_response_bytes)
+                    body, truncated = await _read_limited_body(
+                        response,
+                        settings.max_response_bytes,
+                    )
                     decoded = _decode_text(
                         body,
                         content_type=raw_content_type,
-                        max_preview_chars=policy.max_preview_chars,
+                        max_preview_chars=settings.max_preview_chars,
                     )
                     return FetcherFetchResponse(
                         normalized_url=current.normalized_url,
@@ -177,9 +176,9 @@ async def execute_fetch(url: str) -> FetcherFetchResponse:
                         content_sha256=hashlib.sha256(body).hexdigest(),
                         text=decoded,
                     )
-            except FetchPolicyError as exc:
+            except WebPolicyError as exc:
                 raise HTTPException(
-                    status_code=_policy_status_code(exc.reason),
+                    status_code=web_policy_status_code(exc.reason),
                     detail={
                         "reason": exc.reason,
                         "detail": exc.detail,

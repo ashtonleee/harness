@@ -1,0 +1,23 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_browser_render",
+    "url": "http://allowed.test/browser/rendered"
+  },
+  {
+    "kind": "write_file",
+    "path": "reports/stage6_browser_report.md",
+    "content_template": "task={task}\nurl={last_browser_final_url}\ntitle={last_browser_title}\nrequest_id={last_browser_request_id}\ntrace_id={last_browser_trace_id}\npreview={last_browser_text_preview}\n"
+  },
+  {
+    "kind": "write_binary_base64",
+    "path": "reports/stage6_browser_screenshot.png",
+    "base64_template": "{last_browser_screenshot_base64}"
+  },
+  {
+    "kind": "finish",
+    "summary": "stage6 browser demo complete"
+  }
+]

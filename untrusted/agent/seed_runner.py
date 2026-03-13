@@ -83,11 +83,13 @@ class RunState:
     last_bridge_status: dict[str, Any] | None = None
     last_bridge_chat: dict[str, Any] | None = None
     last_web_fetch: dict[str, Any] | None = None
+    last_browser_render: dict[str, Any] | None = None
 
     def template_context(self) -> dict[str, Any]:
         status = self.last_bridge_status or {}
         chat = self.last_bridge_chat or {}
         fetch = self.last_web_fetch or {}
+        browser = self.last_browser_render or {}
         return {
             "task": self.task,
             "run_id": self.run_id,
@@ -100,6 +102,14 @@ class RunState:
             "last_web_fetch_request_id": fetch.get("request_id", ""),
             "last_web_fetch_trace_id": fetch.get("trace_id", ""),
             "last_web_fetch_preview": fetch.get("preview", ""),
+            "last_browser_request_id": browser.get("request_id", ""),
+            "last_browser_trace_id": browser.get("trace_id", ""),
+            "last_browser_normalized_url": browser.get("normalized_url", ""),
+            "last_browser_final_url": browser.get("final_url", ""),
+            "last_browser_title": browser.get("page_title", ""),
+            "last_browser_meta_description": browser.get("meta_description", ""),
+            "last_browser_text_preview": browser.get("text_preview", ""),
+            "last_browser_screenshot_base64": browser.get("screenshot_png_base64", ""),
         }
 
 
@@ -156,18 +166,32 @@ class SeedRunner:
         )
 
     def _reportable_result(self, action_kind: str, result: dict[str, Any]) -> dict[str, Any]:
-        if action_kind != "bridge_fetch":
-            return result
-        return {
-            "request_id": result["request_id"],
-            "trace_id": result["trace_id"],
-            "normalized_url": result["normalized_url"],
-            "final_url": result["final_url"],
-            "http_status": result["http_status"],
-            "content_type": result["content_type"],
-            "byte_count": result["byte_count"],
-            "truncated": result["truncated"],
-        }
+        if action_kind == "bridge_fetch":
+            return {
+                "request_id": result["request_id"],
+                "trace_id": result["trace_id"],
+                "normalized_url": result["normalized_url"],
+                "final_url": result["final_url"],
+                "http_status": result["http_status"],
+                "content_type": result["content_type"],
+                "byte_count": result["byte_count"],
+                "truncated": result["truncated"],
+            }
+        if action_kind == "bridge_browser_render":
+            return {
+                "request_id": result["request_id"],
+                "trace_id": result["trace_id"],
+                "normalized_url": result["normalized_url"],
+                "final_url": result["final_url"],
+                "http_status": result["http_status"],
+                "page_title": result["page_title"],
+                "meta_description": result["meta_description"],
+                "text_bytes": result["text_bytes"],
+                "text_truncated": result["text_truncated"],
+                "screenshot_sha256": result["screenshot_sha256"],
+                "screenshot_bytes": result["screenshot_bytes"],
+            }
+        return result
 
     async def _execute_action(self, action: PlanAction, state: RunState) -> dict[str, Any]:
         if action.kind == "bridge_status":
@@ -214,6 +238,33 @@ class SeedRunner:
                 "content_preview": response.text[:200],
             }
 
+        if action.kind == "bridge_browser_render":
+            response = await self.bridge_client.browser_render(url=action.params["url"])
+            state.last_browser_render = {
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "normalized_url": response.normalized_url,
+                "final_url": response.final_url,
+                "page_title": response.page_title,
+                "meta_description": response.meta_description,
+                "text_preview": response.rendered_text[:200],
+                "screenshot_png_base64": response.screenshot_png_base64,
+            }
+            return {
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "normalized_url": response.normalized_url,
+                "final_url": response.final_url,
+                "http_status": response.http_status,
+                "page_title": response.page_title,
+                "meta_description": response.meta_description,
+                "text_bytes": response.text_bytes,
+                "text_truncated": response.text_truncated,
+                "content_preview": response.rendered_text[:200],
+                "screenshot_sha256": response.screenshot_sha256,
+                "screenshot_bytes": response.screenshot_bytes,
+            }
+
         if action.kind == "list_files":
             path = action.params.get("path", ".")
             files = self.workspace.list_files(path)
@@ -235,6 +286,11 @@ class SeedRunner:
             else:
                 content = self._resolve_text(action.params["content_template"], state)
             return self.workspace.write_file(path, content)
+
+        if action.kind == "write_binary_base64":
+            path = action.params["path"]
+            base64_data = self._resolve_text(action.params["base64_template"], state)
+            return self.workspace.write_binary_base64(path, base64_data)
 
         if action.kind == "run_command":
             argv = [self._resolve_text(part, state) for part in action.params["argv"]]

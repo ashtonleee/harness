@@ -96,6 +96,27 @@ class WebState(BaseModel):
     recent_fetches: list[WebFetchRecord]
 
 
+class BrowserRenderRecord(BaseModel):
+    timestamp: str
+    request_id: str
+    trace_id: str
+    outcome: str
+    normalized_url: str
+    final_url: str
+    http_status: int | None = None
+    page_title: str = ""
+    text_bytes: int = 0
+    text_truncated: bool = False
+    screenshot_bytes: int = 0
+
+
+class BrowserState(BaseModel):
+    service: ConnectionStatus
+    caps: dict[str, int | float]
+    counters: dict[str, int]
+    recent_renders: list[BrowserRenderRecord]
+
+
 class BridgeStatusReport(BaseModel):
     service: str
     stage: str
@@ -106,6 +127,7 @@ class BridgeStatusReport(BaseModel):
     budget: BudgetState
     recovery: RecoveryState
     web: WebState
+    browser: BrowserState
     counters: dict[str, int]
     recent_requests: list[RecentRequest]
     surfaces: dict[str, str]
@@ -199,5 +221,32 @@ class FetcherFetchResponse(BaseModel):
 
 
 class WebFetchResponse(FetcherFetchResponse):
+    request_id: str
+    trace_id: str
+
+
+class BrowserRenderRequest(BaseModel):
+    url: str
+
+
+class BrowserRenderInternalResponse(BaseModel):
+    normalized_url: str
+    final_url: str
+    http_status: int | None = None
+    page_title: str
+    meta_description: str
+    rendered_text: str
+    rendered_text_sha256: str
+    text_bytes: int
+    text_truncated: bool
+    screenshot_png_base64: str
+    screenshot_sha256: str
+    screenshot_bytes: int
+    redirect_chain: list[str]
+    observed_hosts: list[str]
+    resolved_ips: list[str]
+
+
+class BrowserRenderResponse(BrowserRenderInternalResponse):
     request_id: str
     trace_id: str

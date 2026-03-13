@@ -133,10 +133,16 @@ class WorkspaceRecoveryStore:
         if manifest_path.exists():
             manifest_payload = json.loads(manifest_path.read_text(encoding="ascii"))
 
+        manifest_matches_context = (
+            manifest_payload is not None
+            and manifest_payload.get("baseline_id") == baseline["baseline_id"]
+            and manifest_payload.get("archive_path") == baseline["archive_path"]
+            and manifest_payload.get("manifest_path") == baseline["manifest_path"]
+            and manifest_payload.get("baseline_source_dir") == baseline["baseline_source_dir"]
+        )
         if (
             not archive_path.exists()
-            or manifest_payload is None
-            or manifest_payload.get("baseline_id") != baseline["baseline_id"]
+            or not manifest_matches_context
         ):
             _write_archive(self.baseline_source_dir, archive_path)
             _write_json_atomic(manifest_path, baseline)

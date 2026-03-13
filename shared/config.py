@@ -11,6 +11,7 @@ DEFAULT_CHECKPOINT_DIR = DEFAULT_TRUSTED_STATE_DIR / "checkpoints"
 DEFAULT_BRIDGE_URL = "http://bridge:8000"
 DEFAULT_LITELLM_URL = "http://litellm:4000"
 DEFAULT_FETCHER_URL = "http://fetcher:8082"
+DEFAULT_BROWSER_URL = "http://browser:8083"
 DEFAULT_AGENT_URL = "http://agent:8001"
 DEFAULT_AGENT_WORKSPACE_DIR = ROOT / "untrusted" / "agent_workspace"
 DEFAULT_AGENT_RUNTIME_CODE_DIR = ROOT / "untrusted"
@@ -26,6 +27,12 @@ DEFAULT_WEB_MAX_PREVIEW_CHARS = 1024
 DEFAULT_WEB_MAX_REDIRECTS = 3
 DEFAULT_WEB_TIMEOUT_SECONDS = 5.0
 DEFAULT_FETCH_USER_AGENT = "rsi-fetcher/0.1"
+DEFAULT_BROWSER_VIEWPORT_WIDTH = 1280
+DEFAULT_BROWSER_VIEWPORT_HEIGHT = 720
+DEFAULT_BROWSER_TIMEOUT_SECONDS = 10.0
+DEFAULT_BROWSER_SETTLE_TIME_MS = 500
+DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES = 16384
+DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES = 1024 * 1024
 
 
 def _resolve_path(raw: str | None, default: Path) -> Path:
@@ -63,6 +70,7 @@ class BridgeSettings:
     seed_baseline_dir: Path
     litellm_url: str
     fetcher_url: str
+    browser_url: str
     agent_url: str
     llm_budget_token_cap: int
     budget_unit: str
@@ -74,7 +82,30 @@ class BridgeSettings:
     web_max_redirects: int
     web_timeout_seconds: float
     fetch_user_agent: str
+    browser_timeout_seconds: float
+    browser_viewport_width: int
+    browser_viewport_height: int
+    browser_settle_time_ms: int
+    browser_max_rendered_text_bytes: int
+    browser_max_screenshot_bytes: int
     enable_debug_probes: bool
+
+
+@dataclass(frozen=True)
+class BrowserSettings:
+    service_name: str
+    stage: str
+    browser_url: str
+    allowlist_hosts: tuple[str, ...]
+    private_test_hosts: tuple[str, ...]
+    max_redirects: int
+    timeout_seconds: float
+    viewport_width: int
+    viewport_height: int
+    settle_time_ms: int
+    max_rendered_text_bytes: int
+    max_screenshot_bytes: int
+    enable_private_test_hosts: bool
 
 
 @dataclass(frozen=True)
@@ -144,9 +175,51 @@ def bridge_settings() -> BridgeSettings:
     assert web_max_preview_chars > 0
     assert web_max_redirects >= 0
     assert web_timeout_seconds > 0
+    browser_timeout_seconds = float(
+        os.environ.get(
+            "RSI_BROWSER_TIMEOUT_SECONDS",
+            str(DEFAULT_BROWSER_TIMEOUT_SECONDS),
+        ).strip()
+    )
+    browser_viewport_width = int(
+        os.environ.get(
+            "RSI_BROWSER_VIEWPORT_WIDTH",
+            str(DEFAULT_BROWSER_VIEWPORT_WIDTH),
+        ).strip()
+    )
+    browser_viewport_height = int(
+        os.environ.get(
+            "RSI_BROWSER_VIEWPORT_HEIGHT",
+            str(DEFAULT_BROWSER_VIEWPORT_HEIGHT),
+        ).strip()
+    )
+    browser_settle_time_ms = int(
+        os.environ.get(
+            "RSI_BROWSER_SETTLE_TIME_MS",
+            str(DEFAULT_BROWSER_SETTLE_TIME_MS),
+        ).strip()
+    )
+    browser_max_rendered_text_bytes = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_RENDERED_TEXT_BYTES",
+            str(DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES),
+        ).strip()
+    )
+    browser_max_screenshot_bytes = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_SCREENSHOT_BYTES",
+            str(DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES),
+        ).strip()
+    )
+    assert browser_timeout_seconds > 0
+    assert browser_viewport_width > 0
+    assert browser_viewport_height > 0
+    assert browser_settle_time_ms >= 0
+    assert browser_max_rendered_text_bytes > 0
+    assert browser_max_screenshot_bytes > 0
     return BridgeSettings(
         service_name="bridge",
-        stage="stage5_read_only_web",
+        stage="stage6_read_only_browser",
         trusted_state_dir=trusted_state_dir,
         log_dir=_resolve_path(
             os.environ.get("RSI_BRIDGE_LOG_DIR"),
@@ -166,6 +239,7 @@ def bridge_settings() -> BridgeSettings:
         ),
         litellm_url=os.environ.get("RSI_LITELLM_URL", DEFAULT_LITELLM_URL).strip(),
         fetcher_url=os.environ.get("RSI_FETCHER_URL", DEFAULT_FETCHER_URL).strip(),
+        browser_url=os.environ.get("RSI_BROWSER_URL", DEFAULT_BROWSER_URL).strip(),
         agent_url=os.environ.get("RSI_AGENT_URL", DEFAULT_AGENT_URL).strip(),
         llm_budget_token_cap=llm_budget_token_cap,
         budget_unit=os.environ.get("RSI_BUDGET_UNIT", DEFAULT_BUDGET_UNIT).strip(),
@@ -189,6 +263,12 @@ def bridge_settings() -> BridgeSettings:
             "RSI_FETCH_USER_AGENT",
             DEFAULT_FETCH_USER_AGENT,
         ).strip(),
+        browser_timeout_seconds=browser_timeout_seconds,
+        browser_viewport_width=browser_viewport_width,
+        browser_viewport_height=browser_viewport_height,
+        browser_settle_time_ms=browser_settle_time_ms,
+        browser_max_rendered_text_bytes=browser_max_rendered_text_bytes,
+        browser_max_screenshot_bytes=browser_max_screenshot_bytes,
         enable_debug_probes=_env_flag("RSI_ENABLE_DEBUG_PROBES"),
     )
 
@@ -220,7 +300,7 @@ def fetcher_settings() -> FetcherSettings:
     )
     return FetcherSettings(
         service_name="fetcher",
-        stage="stage5_read_only_web",
+        stage="stage6_read_only_browser",
         fetcher_url=os.environ.get("RSI_FETCHER_URL", DEFAULT_FETCHER_URL).strip(),
         allowlist_hosts=_split_csv(
             os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),
@@ -246,13 +326,88 @@ def fetcher_settings() -> FetcherSettings:
     )
 
 
+def browser_settings() -> BrowserSettings:
+    browser_timeout_seconds = float(
+        os.environ.get(
+            "RSI_BROWSER_TIMEOUT_SECONDS",
+            str(DEFAULT_BROWSER_TIMEOUT_SECONDS),
+        ).strip()
+    )
+    browser_viewport_width = int(
+        os.environ.get(
+            "RSI_BROWSER_VIEWPORT_WIDTH",
+            str(DEFAULT_BROWSER_VIEWPORT_WIDTH),
+        ).strip()
+    )
+    browser_viewport_height = int(
+        os.environ.get(
+            "RSI_BROWSER_VIEWPORT_HEIGHT",
+            str(DEFAULT_BROWSER_VIEWPORT_HEIGHT),
+        ).strip()
+    )
+    browser_settle_time_ms = int(
+        os.environ.get(
+            "RSI_BROWSER_SETTLE_TIME_MS",
+            str(DEFAULT_BROWSER_SETTLE_TIME_MS),
+        ).strip()
+    )
+    browser_max_rendered_text_bytes = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_RENDERED_TEXT_BYTES",
+            str(DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES),
+        ).strip()
+    )
+    browser_max_screenshot_bytes = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_SCREENSHOT_BYTES",
+            str(DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES),
+        ).strip()
+    )
+    assert browser_timeout_seconds > 0
+    assert browser_viewport_width > 0
+    assert browser_viewport_height > 0
+    assert browser_settle_time_ms >= 0
+    assert browser_max_rendered_text_bytes > 0
+    assert browser_max_screenshot_bytes > 0
+
+    return BrowserSettings(
+        service_name="browser",
+        stage="stage6_read_only_browser",
+        browser_url=os.environ.get("RSI_BROWSER_URL", DEFAULT_BROWSER_URL).strip(),
+        allowlist_hosts=_split_csv(
+            os.environ.get("RSI_WEB_ALLOWLIST_HOSTS"),
+            DEFAULT_WEB_ALLOWLIST_HOSTS,
+        ),
+        private_test_hosts=_split_csv(
+            os.environ.get("RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"),
+            (),
+        ),
+        max_redirects=int(
+            os.environ.get(
+                "RSI_WEB_MAX_REDIRECTS",
+                str(DEFAULT_WEB_MAX_REDIRECTS),
+            ).strip()
+        ),
+        timeout_seconds=browser_timeout_seconds,
+        viewport_width=browser_viewport_width,
+        viewport_height=browser_viewport_height,
+        settle_time_ms=browser_settle_time_ms,
+        max_rendered_text_bytes=browser_max_rendered_text_bytes,
+        max_screenshot_bytes=browser_max_screenshot_bytes,
+        enable_private_test_hosts=_env_flag(
+            "RSI_FETCH_ENABLE_PRIVATE_TEST_HOSTS",
+            default=True,
+        ),
+    )
+
+
 def agent_settings() -> AgentSettings:
     bridge_url = os.environ.get("RSI_BRIDGE_URL", DEFAULT_BRIDGE_URL).strip()
     assert bridge_url, "RSI_BRIDGE_URL must not be empty"
 
     return AgentSettings(
         service_name="agent",
-        stage="stage5_read_only_web",
+        stage="stage6_read_only_browser",
         bridge_url=bridge_url,
         workspace_dir=_resolve_path(
             os.environ.get("RSI_AGENT_WORKSPACE_DIR"),

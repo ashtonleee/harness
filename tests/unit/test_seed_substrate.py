@@ -7,6 +7,8 @@ import pytest
 from shared.config import agent_settings
 from shared.schemas import (
     AgentRunEventReceipt,
+    BrowserRenderResponse,
+    BrowserState,
     BridgeStatusReport,
     BudgetState,
     ChatChoice,
@@ -29,13 +31,14 @@ class FakeBridgeClient:
         self.status_calls = 0
         self.chat_calls = 0
         self.fetch_calls = 0
+        self.browser_render_calls = 0
         self.reported_events: list[dict] = []
 
     async def status(self) -> BridgeStatusReport:
         self.status_calls += 1
         return BridgeStatusReport(
             service="bridge",
-            stage="stage5_read_only_web",
+            stage="stage6_read_only_browser",
             trusted_state_dir="/var/lib/rsi/trusted_state",
             log_path="/var/lib/rsi/trusted_state/logs/bridge_events.jsonl",
             operational_state_path="/var/lib/rsi/trusted_state/state/operational_state.json",
@@ -48,6 +51,12 @@ class FakeBridgeClient:
                 ),
                 "fetcher": ConnectionStatus(
                     url="http://fetcher:8082",
+                    reachable=True,
+                    detail=None,
+                    checked_at="2026-03-12T00:00:00+00:00",
+                ),
+                "browser": ConnectionStatus(
+                    url="http://browser:8083",
                     reachable=True,
                     detail=None,
                     checked_at="2026-03-12T00:00:00+00:00",
@@ -99,6 +108,29 @@ class FakeBridgeClient:
                 },
                 recent_fetches=[],
             ),
+            browser=BrowserState(
+                service=ConnectionStatus(
+                    url="http://browser:8083",
+                    reachable=True,
+                    detail=None,
+                    checked_at="2026-03-12T00:00:00+00:00",
+                ),
+                caps={
+                    "viewport_width": 1280,
+                    "viewport_height": 720,
+                    "timeout_seconds": 10.0,
+                    "settle_time_ms": 500,
+                    "max_rendered_text_bytes": 16384,
+                    "max_screenshot_bytes": 1048576,
+                },
+                counters={
+                    "browser_render_total": 0,
+                    "browser_render_success": 0,
+                    "browser_render_denied": 0,
+                    "browser_render_errors": 0,
+                },
+                recent_renders=[],
+            ),
             counters={"status_queries": 1, "llm_calls_total": 1},
             recent_requests=[
                 RecentRequest(
@@ -111,7 +143,10 @@ class FakeBridgeClient:
                     outcome="success",
                 )
             ],
-            surfaces={"seed_agent": "local_only_stage3_substrate"},
+            surfaces={
+                "seed_agent": "local_only_stage3_substrate",
+                "browser": "trusted_browser_stage6a_read_only_render",
+            },
         )
 
     async def chat(self, *, model: str, message: str) -> ChatCompletionResponse:
@@ -155,7 +190,6 @@ class FakeBridgeClient:
         return WebFetchResponse(
             request_id="fetch-req-1",
             trace_id="fetch-trace-1",
-            url=url,
             normalized_url=url,
             final_url=url,
             scheme="https",
@@ -170,6 +204,28 @@ class FakeBridgeClient:
             used_ip="93.184.216.34",
             content_sha256="hash",
             text="example preview text",
+        )
+
+    async def browser_render(self, *, url: str) -> BrowserRenderResponse:
+        self.browser_render_calls += 1
+        return BrowserRenderResponse(
+            request_id="browser-req-1",
+            trace_id="browser-trace-1",
+            normalized_url=url,
+            final_url=url,
+            http_status=200,
+            page_title="Fixture Browser Title",
+            meta_description="Fixture browser description",
+            rendered_text="Rendered browser text preview",
+            rendered_text_sha256="text-hash",
+            text_bytes=28,
+            text_truncated=False,
+            screenshot_png_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII=",
+            screenshot_sha256="image-hash",
+            screenshot_bytes=67,
+            redirect_chain=[],
+            observed_hosts=["example.com"],
+            resolved_ips=["93.184.216.34"],
         )
 
 
@@ -333,3 +389,56 @@ def test_scripted_planner_can_fetch_via_bridge_and_write_report(tmp_path):
     assert "https://example.com/" in payload
     assert "fetch-req-1" in payload
     assert "example preview text" in payload
+
+
+def test_scripted_planner_can_render_browser_via_bridge_and_write_artifacts(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    bridge = FakeBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_browser_render", params={"url": "https://example.com/"}),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "reports/browser_report.md",
+                    "content_template": (
+                        "url={last_browser_final_url}\n"
+                        "title={last_browser_title}\n"
+                        "request_id={last_browser_request_id}\n"
+                        "trace_id={last_browser_trace_id}\n"
+                        "preview={last_browser_text_preview}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_binary_base64",
+                params={
+                    "path": "reports/browser.png",
+                    "base64_template": "{last_browser_screenshot_base64}",
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "browser render complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=5,
+    )
+
+    result = asyncio.run(runner.run("render one page"))
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    report = workspace_dir / "reports" / "browser_report.md"
+    screenshot = workspace_dir / "reports" / "browser.png"
+    assert report.exists()
+    assert screenshot.exists()
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    payload = report.read_text(encoding="ascii")
+    assert "Fixture Browser Title" in payload
+    assert "browser-req-1" in payload
+    assert "Rendered browser text preview" in payload

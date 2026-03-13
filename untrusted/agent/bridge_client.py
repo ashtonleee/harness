@@ -8,6 +8,8 @@ from shared.config import DEFAULT_BRIDGE_URL
 from shared.schemas import (
     AgentRunEventReceipt,
     AgentRunEventRequest,
+    BrowserRenderRequest,
+    BrowserRenderResponse,
     BridgeStatusReport,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -60,6 +62,17 @@ class BridgeClient:
             response.raise_for_status()
         return WebFetchResponse.model_validate(response.json())
 
+    async def browser_render(self, *, url: str) -> BrowserRenderResponse:
+        payload = BrowserRenderRequest(url=url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=20.0) as client:
+            response = await client.post(
+                "/web/browser/render",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserRenderResponse.model_validate(response.json())
+
     async def report_agent_event(
         self,
         *,
@@ -110,6 +123,9 @@ def main():
     fetch_parser = subparsers.add_parser("fetch")
     fetch_parser.add_argument("--url", required=True)
 
+    browser_parser = subparsers.add_parser("browser-render")
+    browser_parser.add_argument("--url", required=True)
+
     args = parser.parse_args()
     if args.command in (None, "health"):
         result = asyncio.run(probe_bridge(args.bridge_url))
@@ -125,6 +141,10 @@ def main():
     elif args.command == "fetch":
         result = asyncio.run(
             BridgeClient(args.bridge_url).fetch(url=args.url)
+        ).model_dump()
+    elif args.command == "browser-render":
+        result = asyncio.run(
+            BridgeClient(args.bridge_url).browser_render(url=args.url)
         ).model_dump()
     else:
         raise ValueError(f"unsupported command: {args.command}")

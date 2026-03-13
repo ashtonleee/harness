@@ -34,6 +34,7 @@ class TrustedStateManager:
         surfaces: dict[str, str],
         recovery_defaults: dict[str, Any] | None = None,
         web_defaults: dict[str, Any] | None = None,
+        browser_defaults: dict[str, Any] | None = None,
         recent_limit: int = 12,
     ):
         self.canonical_log_path = canonical_log_path
@@ -44,6 +45,7 @@ class TrustedStateManager:
         self.surfaces = dict(surfaces)
         self.recovery_defaults = json.loads(json.dumps(recovery_defaults or {}))
         self.web_defaults = json.loads(json.dumps(web_defaults or {}))
+        self.browser_defaults = json.loads(json.dumps(browser_defaults or {}))
         self.recent_limit = recent_limit
         self._snapshot = self._initial_snapshot()
         self._rebuild_from_log()
@@ -77,6 +79,10 @@ class TrustedStateManager:
                 "web_fetch_success": 0,
                 "web_fetch_denied": 0,
                 "web_fetch_errors": 0,
+                "browser_render_total": 0,
+                "browser_render_success": 0,
+                "browser_render_denied": 0,
+                "browser_render_errors": 0,
                 "status_queries": 0,
                 "system_events": 0,
                 "agent_run_events": 0,
@@ -102,6 +108,15 @@ class TrustedStateManager:
                         "not_checked_yet",
                     ),
                     "checked_at": self.web_defaults.get("fetcher", {}).get("checked_at"),
+                },
+                "browser": {
+                    "url": self.browser_defaults.get("service", {}).get("url", "http://browser:8083"),
+                    "reachable": self.browser_defaults.get("service", {}).get("reachable", False),
+                    "detail": self.browser_defaults.get("service", {}).get(
+                        "detail",
+                        "not_checked_yet",
+                    ),
+                    "checked_at": self.browser_defaults.get("service", {}).get("checked_at"),
                 },
             },
             "recovery": {
@@ -148,6 +163,27 @@ class TrustedStateManager:
                 },
                 "recent_fetches": [],
             },
+            "browser": {
+                "service": dict(
+                    self.browser_defaults.get(
+                        "service",
+                        {
+                            "url": "http://browser:8083",
+                            "reachable": False,
+                            "detail": "not_checked_yet",
+                            "checked_at": None,
+                        },
+                    )
+                ),
+                "caps": dict(self.browser_defaults.get("caps", {})),
+                "counters": {
+                    "browser_render_total": 0,
+                    "browser_render_success": 0,
+                    "browser_render_denied": 0,
+                    "browser_render_errors": 0,
+                },
+                "recent_renders": [],
+            },
             "recent_requests": [],
             "last_event_timestamp": None,
         }
@@ -174,6 +210,8 @@ class TrustedStateManager:
             self._snapshot["connections"][name] = current
             if name == "fetcher":
                 self._snapshot["web"]["fetcher"] = dict(current)
+            if name == "browser":
+                self._snapshot["browser"]["service"] = dict(current)
 
     def _apply_budget_update(self, summary: dict[str, Any]):
         budget = self._snapshot["budget"]
@@ -251,6 +289,17 @@ class TrustedStateManager:
         if "caps" in web_payload:
             web["caps"] = dict(web_payload["caps"])
 
+    def _apply_browser_defaults(self, summary: dict[str, Any]):
+        browser_payload = summary.get("browser", {})
+        if not browser_payload:
+            return
+
+        browser = self._snapshot["browser"]
+        if "service" in browser_payload:
+            browser["service"] = dict(browser_payload["service"])
+        if "caps" in browser_payload:
+            browser["caps"] = dict(browser_payload["caps"])
+
     def _push_recent_fetch(self, event: dict[str, Any]):
         summary = event["summary"]
         fetches = self._snapshot["web"]["recent_fetches"]
@@ -270,6 +319,27 @@ class TrustedStateManager:
             },
         )
         del fetches[self.recent_limit :]
+
+    def _push_recent_render(self, event: dict[str, Any]):
+        summary = event["summary"]
+        renders = self._snapshot["browser"]["recent_renders"]
+        renders.insert(
+            0,
+            {
+                "timestamp": event["timestamp"],
+                "request_id": event["request_id"],
+                "trace_id": event["trace_id"],
+                "outcome": event["outcome"],
+                "normalized_url": summary.get("normalized_url", ""),
+                "final_url": summary.get("final_url", ""),
+                "http_status": summary.get("http_status"),
+                "page_title": summary.get("page_title", ""),
+                "text_bytes": int(summary.get("text_bytes", 0)),
+                "text_truncated": bool(summary.get("text_truncated", False)),
+                "screenshot_bytes": int(summary.get("screenshot_bytes", 0)),
+            },
+        )
+        del renders[self.recent_limit :]
 
     def _push_recent_request(self, event: dict[str, Any]):
         recent = self._snapshot["recent_requests"]
@@ -329,6 +399,24 @@ class TrustedStateManager:
             self._snapshot["web"]["counters"]["web_fetch_total"] += 1
             self._snapshot["web"]["counters"]["web_fetch_errors"] += 1
             self._push_recent_fetch(event)
+        elif event_type == "browser_render":
+            self._snapshot["counters"]["browser_render_total"] += 1
+            self._snapshot["counters"]["browser_render_success"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_success"] += 1
+            self._push_recent_render(event)
+        elif event_type == "browser_render_denied":
+            self._snapshot["counters"]["browser_render_total"] += 1
+            self._snapshot["counters"]["browser_render_denied"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_denied"] += 1
+            self._push_recent_render(event)
+        elif event_type == "browser_render_error":
+            self._snapshot["counters"]["browser_render_total"] += 1
+            self._snapshot["counters"]["browser_render_errors"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_render_errors"] += 1
+            self._push_recent_render(event)
         elif event_type == "status_query":
             self._snapshot["counters"]["status_queries"] += 1
         elif event_type == "agent_run":
@@ -342,6 +430,7 @@ class TrustedStateManager:
         if surfaces:
             self._snapshot["surfaces"].update(surfaces)
         self._apply_web_defaults(summary)
+        self._apply_browser_defaults(summary)
 
     def _write_snapshot(self):
         _write_json_atomic(self.operational_state_path, self._snapshot)
