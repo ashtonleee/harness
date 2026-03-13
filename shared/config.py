@@ -33,6 +33,8 @@ DEFAULT_BROWSER_TIMEOUT_SECONDS = 10.0
 DEFAULT_BROWSER_SETTLE_TIME_MS = 500
 DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES = 16384
 DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES = 1024 * 1024
+DEFAULT_BROWSER_MAX_FOLLOWABLE_LINKS = 20
+DEFAULT_BROWSER_MAX_FOLLOW_HOPS = 1
 
 
 def _resolve_path(raw: str | None, default: Path) -> Path:
@@ -88,6 +90,8 @@ class BridgeSettings:
     browser_settle_time_ms: int
     browser_max_rendered_text_bytes: int
     browser_max_screenshot_bytes: int
+    browser_max_followable_links: int
+    browser_max_follow_hops: int
     enable_debug_probes: bool
 
 
@@ -105,6 +109,8 @@ class BrowserSettings:
     settle_time_ms: int
     max_rendered_text_bytes: int
     max_screenshot_bytes: int
+    max_followable_links: int
+    max_follow_hops: int
     enable_private_test_hosts: bool
 
 
@@ -211,12 +217,26 @@ def bridge_settings() -> BridgeSettings:
             str(DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES),
         ).strip()
     )
+    browser_max_followable_links = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_FOLLOWABLE_LINKS",
+            str(DEFAULT_BROWSER_MAX_FOLLOWABLE_LINKS),
+        ).strip()
+    )
+    browser_max_follow_hops = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_FOLLOW_HOPS",
+            str(DEFAULT_BROWSER_MAX_FOLLOW_HOPS),
+        ).strip()
+    )
     assert browser_timeout_seconds > 0
     assert browser_viewport_width > 0
     assert browser_viewport_height > 0
     assert browser_settle_time_ms >= 0
     assert browser_max_rendered_text_bytes > 0
     assert browser_max_screenshot_bytes > 0
+    assert browser_max_followable_links > 0
+    assert browser_max_follow_hops == 1
     return BridgeSettings(
         service_name="bridge",
         stage="stage6_read_only_browser",
@@ -269,6 +289,8 @@ def bridge_settings() -> BridgeSettings:
         browser_settle_time_ms=browser_settle_time_ms,
         browser_max_rendered_text_bytes=browser_max_rendered_text_bytes,
         browser_max_screenshot_bytes=browser_max_screenshot_bytes,
+        browser_max_followable_links=browser_max_followable_links,
+        browser_max_follow_hops=browser_max_follow_hops,
         enable_debug_probes=_env_flag("RSI_ENABLE_DEBUG_PROBES"),
     )
 
@@ -363,12 +385,26 @@ def browser_settings() -> BrowserSettings:
             str(DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES),
         ).strip()
     )
+    browser_max_followable_links = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_FOLLOWABLE_LINKS",
+            str(DEFAULT_BROWSER_MAX_FOLLOWABLE_LINKS),
+        ).strip()
+    )
+    browser_max_follow_hops = int(
+        os.environ.get(
+            "RSI_BROWSER_MAX_FOLLOW_HOPS",
+            str(DEFAULT_BROWSER_MAX_FOLLOW_HOPS),
+        ).strip()
+    )
     assert browser_timeout_seconds > 0
     assert browser_viewport_width > 0
     assert browser_viewport_height > 0
     assert browser_settle_time_ms >= 0
     assert browser_max_rendered_text_bytes > 0
     assert browser_max_screenshot_bytes > 0
+    assert browser_max_followable_links > 0
+    assert browser_max_follow_hops == 1
 
     return BrowserSettings(
         service_name="browser",
@@ -394,6 +430,8 @@ def browser_settings() -> BrowserSettings:
         settle_time_ms=browser_settle_time_ms,
         max_rendered_text_bytes=browser_max_rendered_text_bytes,
         max_screenshot_bytes=browser_max_screenshot_bytes,
+        max_followable_links=browser_max_followable_links,
+        max_follow_hops=browser_max_follow_hops,
         enable_private_test_hosts=_env_flag(
             "RSI_FETCH_ENABLE_PRIVATE_TEST_HOSTS",
             default=True,

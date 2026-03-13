@@ -13,6 +13,8 @@ from shared.mock_llm import MINIMUM_DETERMINISTIC_CALL_TOKENS, deterministic_usa
 from shared.schemas import (
     AgentRunEventReceipt,
     AgentRunEventRequest,
+    BrowserFollowHrefRequest,
+    BrowserFollowHrefResponse,
     BrowserRenderRequest,
     BrowserRenderResponse,
     BrowserState,
@@ -60,6 +62,7 @@ def build_surfaces() -> dict[str, str]:
         "recovery": "trusted_host_checkpoint_controls_stage4",
         "read_only_web": "trusted_fetcher_stage5_read_only_get",
         "browser": "trusted_browser_stage6a_read_only_render",
+        "browser_follow_href": "trusted_browser_stage6b_safe_follow_href",
         "approvals": "stubbed_for_stage_7",
         "consequential_actions": "stubbed_for_stage_8",
     }
@@ -100,9 +103,12 @@ def make_headers(request_id: str, trace_id: str) -> dict[str, str]:
     }
 
 
-def caller_actor(request: Request, *, default: str) -> str:
-    actor = request.headers.get("x-rsi-actor", "").strip()
-    return actor or default
+def status_route_actor() -> str:
+    return "unauthenticated_bridge_client"
+
+
+def agent_route_actor() -> str:
+    return "agent"
 
 
 def request_identity() -> tuple[str, str]:
@@ -201,6 +207,8 @@ def browser_defaults_for(settings) -> dict:
             "settle_time_ms": settings.browser_settle_time_ms,
             "max_rendered_text_bytes": settings.browser_max_rendered_text_bytes,
             "max_screenshot_bytes": settings.browser_max_screenshot_bytes,
+            "max_followable_links": settings.browser_max_followable_links,
+            "max_follow_hops": settings.browser_max_follow_hops,
         },
     }
 
@@ -330,7 +338,7 @@ async def status(request: Request, response: Response) -> BridgeStatusReport:
     status_browser["service"] = connections["browser"]
     append_event(
         event_type="status_query",
-        actor=caller_actor(request, default="operator"),
+        actor=status_route_actor(),
         request_id=request_id,
         trace_id=trace_id,
         outcome="success",
@@ -361,7 +369,7 @@ async def agent_run_event(
     request_id, trace_id = request_identity()
     append_event(
         event_type="agent_run",
-        actor=caller_actor(request, default="agent"),
+        actor=agent_route_actor(),
         request_id=request_id,
         trace_id=trace_id,
         outcome="recorded",
@@ -389,7 +397,7 @@ async def chat_completions(
     request: Request,
 ) -> ChatCompletionResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = caller_actor(request, default="unknown")
+    actor = agent_route_actor()
     snapshot = app.state.state_manager.snapshot(refresh=True)
     estimated_usage = deterministic_usage(payload.messages)
 
@@ -578,6 +586,7 @@ def browser_event_summary(render_result, *, outcome: str, reason: str | None = N
         "text_truncated": render_result.text_truncated,
         "screenshot_sha256": render_result.screenshot_sha256,
         "screenshot_bytes": render_result.screenshot_bytes,
+        "followable_links_count": len(getattr(render_result, "followable_links", [])),
     }
     if reason:
         summary["reason"] = reason
@@ -606,6 +615,64 @@ def browser_error_summary(detail: dict) -> dict:
     }
 
 
+def browser_follow_event_summary(follow_result, *, outcome: str, reason: str | None = None) -> dict:
+    host = urlsplit(follow_result.normalized_url).hostname or ""
+    summary = {
+        "source_url": follow_result.source_url,
+        "source_final_url": follow_result.source_final_url,
+        "requested_target_url": follow_result.requested_target_url,
+        "matched_link_text": follow_result.matched_link_text,
+        "follow_hop_count": follow_result.follow_hop_count,
+        "navigation_history": list(follow_result.navigation_history),
+        "normalized_url": follow_result.normalized_url,
+        "final_url": follow_result.final_url,
+        "host": host,
+        "allowlist_decision": "allowed" if outcome == "success" else "denied",
+        "redirect_chain": list(follow_result.redirect_chain),
+        "observed_hosts": list(follow_result.observed_hosts),
+        "resolved_ips": list(follow_result.resolved_ips),
+        "http_status": follow_result.http_status,
+        "page_title": follow_result.page_title,
+        "meta_description": follow_result.meta_description,
+        "rendered_text_sha256": follow_result.rendered_text_sha256,
+        "text_bytes": follow_result.text_bytes,
+        "text_truncated": follow_result.text_truncated,
+        "screenshot_sha256": follow_result.screenshot_sha256,
+        "screenshot_bytes": follow_result.screenshot_bytes,
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+def browser_follow_error_summary(detail: dict) -> dict:
+    host = urlsplit(detail.get("normalized_url", "")).hostname or detail.get("host", "")
+    return {
+        "source_url": detail.get("source_url", ""),
+        "source_final_url": detail.get("source_final_url", detail.get("source_url", "")),
+        "requested_target_url": detail.get("requested_target_url", ""),
+        "matched_link_text": detail.get("matched_link_text", ""),
+        "follow_hop_count": int(detail.get("follow_hop_count", 1)),
+        "navigation_history": list(detail.get("navigation_history", [])),
+        "normalized_url": detail.get("normalized_url", ""),
+        "final_url": detail.get("final_url", detail.get("normalized_url", "")),
+        "host": host,
+        "allowlist_decision": detail.get("allowlist_decision", "denied"),
+        "redirect_chain": list(detail.get("redirect_chain", [])),
+        "observed_hosts": list(detail.get("observed_hosts", [])),
+        "resolved_ips": list(detail.get("resolved_ips", [])),
+        "http_status": detail.get("http_status"),
+        "page_title": detail.get("page_title", ""),
+        "meta_description": detail.get("meta_description", ""),
+        "rendered_text_sha256": detail.get("rendered_text_sha256", ""),
+        "text_bytes": int(detail.get("text_bytes", 0)),
+        "text_truncated": bool(detail.get("text_truncated", False)),
+        "screenshot_sha256": detail.get("screenshot_sha256", ""),
+        "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "reason": detail.get("reason", detail.get("detail", "browser_follow_href_failed")),
+    }
+
+
 @app.post("/web/fetch", response_model=WebFetchResponse)
 async def bridge_fetch(
     payload: WebFetchRequest,
@@ -613,7 +680,7 @@ async def bridge_fetch(
     response: Response,
 ) -> WebFetchResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = caller_actor(request, default="agent")
+    actor = agent_route_actor()
 
     try:
         fetch_result = await app.state.clients.fetch_url(payload)
@@ -695,7 +762,7 @@ async def bridge_browser_render(
     response: Response,
 ) -> BrowserRenderResponse | JSONResponse:
     request_id, trace_id = request_identity()
-    actor = caller_actor(request, default="agent")
+    actor = agent_route_actor()
 
     try:
         render_result = await app.state.clients.browser_render(payload)
@@ -769,6 +836,100 @@ async def bridge_browser_render(
         request_id=request_id,
         trace_id=trace_id,
         **render_result.model_dump(),
+    )
+
+
+@app.post("/web/browser/follow-href", response_model=BrowserFollowHrefResponse)
+async def bridge_browser_follow_href(
+    payload: BrowserFollowHrefRequest,
+    request: Request,
+    response: Response,
+) -> BrowserFollowHrefResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    actor = agent_route_actor()
+
+    try:
+        follow_result = await app.state.clients.browser_follow_href(payload)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.json()
+        status_code = exc.response.status_code
+        event_type = (
+            "browser_follow_href_denied"
+            if status_code in {400, 403, 413}
+            else "browser_follow_href_error"
+        )
+        append_event(
+            event_type=event_type,
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="denied" if event_type == "browser_follow_href_denied" else "error",
+            summary=browser_follow_error_summary(detail),
+        )
+        return JSONResponse(
+            status_code=status_code,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                **detail,
+            },
+        )
+    except httpx.HTTPError as exc:
+        append_event(
+            event_type="browser_follow_href_error",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="error",
+            summary={
+                "source_url": payload.source_url,
+                "source_final_url": payload.source_url,
+                "requested_target_url": payload.target_url,
+                "matched_link_text": "",
+                "follow_hop_count": 1,
+                "navigation_history": [payload.source_url],
+                "normalized_url": payload.target_url,
+                "final_url": payload.target_url,
+                "host": urlsplit(payload.target_url).hostname or "",
+                "allowlist_decision": "unknown",
+                "redirect_chain": [],
+                "observed_hosts": [],
+                "resolved_ips": [],
+                "http_status": None,
+                "page_title": "",
+                "meta_description": "",
+                "rendered_text_sha256": "",
+                "text_bytes": 0,
+                "text_truncated": False,
+                "screenshot_sha256": "",
+                "screenshot_bytes": 0,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return JSONResponse(
+            status_code=502,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    append_event(
+        event_type="browser_follow_href",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary=browser_follow_event_summary(follow_result, outcome="success"),
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserFollowHrefResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **follow_result.model_dump(),
     )
 
 

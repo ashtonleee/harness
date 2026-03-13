@@ -1,5 +1,6 @@
 import pytest
 
+from shared.schemas import BrowserFollowLink
 from trusted.fetcher.app import build_policy as build_fetch_policy
 from trusted.web.policy import (
     WebPolicyError,
@@ -45,6 +46,8 @@ def test_browser_policy_denies_popup_download_and_local_file():
     from trusted.browser.policy import (
         download_violation,
         popup_violation,
+        select_followable_link,
+        top_level_navigation_violation,
         validate_browser_target,
     )
 
@@ -61,3 +64,30 @@ def test_browser_policy_denies_popup_download_and_local_file():
         suggested_filename="download.bin",
     )
     assert download_error.reason == "download_not_allowed"
+
+    top_level_error = top_level_navigation_violation("http://allowed.test/other")
+    assert top_level_error.reason == "top_level_navigation_not_allowed"
+
+    matched = select_followable_link(
+        "http://allowed.test/browser/follow-target",
+        [
+            BrowserFollowLink(
+                text="same origin",
+                target_url="http://allowed.test/browser/follow-target",
+                same_origin=True,
+            )
+        ],
+    )
+    assert matched.target_url == "http://allowed.test/browser/follow-target"
+
+    with pytest.raises(WebPolicyError, match="requested_target_not_present"):
+        select_followable_link(
+            "http://allowed.test/browser/not-linked",
+            [
+                BrowserFollowLink(
+                    text="same origin",
+                    target_url="http://allowed.test/browser/follow-target",
+                    same_origin=True,
+                )
+            ],
+        )

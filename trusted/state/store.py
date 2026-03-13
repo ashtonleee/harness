@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from datetime import datetime, timezone
@@ -47,8 +49,22 @@ class TrustedStateManager:
         self.web_defaults = json.loads(json.dumps(web_defaults or {}))
         self.browser_defaults = json.loads(json.dumps(browser_defaults or {}))
         self.recent_limit = recent_limit
+        self.lock_path = self.operational_state_path.with_suffix(
+            self.operational_state_path.suffix + ".lock"
+        )
         self._snapshot = self._initial_snapshot()
-        self._rebuild_from_log()
+        with self._file_lock():
+            self._rebuild_from_log()
+
+    @contextmanager
+    def _file_lock(self):
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="ascii") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _initial_snapshot(self) -> dict[str, Any]:
         return {
@@ -83,6 +99,10 @@ class TrustedStateManager:
                 "browser_render_success": 0,
                 "browser_render_denied": 0,
                 "browser_render_errors": 0,
+                "browser_follow_href_total": 0,
+                "browser_follow_href_success": 0,
+                "browser_follow_href_denied": 0,
+                "browser_follow_href_errors": 0,
                 "status_queries": 0,
                 "system_events": 0,
                 "agent_run_events": 0,
@@ -181,8 +201,13 @@ class TrustedStateManager:
                     "browser_render_success": 0,
                     "browser_render_denied": 0,
                     "browser_render_errors": 0,
+                    "browser_follow_href_total": 0,
+                    "browser_follow_href_success": 0,
+                    "browser_follow_href_denied": 0,
+                    "browser_follow_href_errors": 0,
                 },
                 "recent_renders": [],
+                "recent_follows": [],
             },
             "recent_requests": [],
             "last_event_timestamp": None,
@@ -341,6 +366,28 @@ class TrustedStateManager:
         )
         del renders[self.recent_limit :]
 
+    def _push_recent_follow(self, event: dict[str, Any]):
+        summary = event["summary"]
+        follows = self._snapshot["browser"]["recent_follows"]
+        follows.insert(
+            0,
+            {
+                "timestamp": event["timestamp"],
+                "request_id": event["request_id"],
+                "trace_id": event["trace_id"],
+                "outcome": event["outcome"],
+                "source_url": summary.get("source_url", ""),
+                "requested_target_url": summary.get("requested_target_url", ""),
+                "final_url": summary.get("final_url", ""),
+                "http_status": summary.get("http_status"),
+                "page_title": summary.get("page_title", ""),
+                "text_bytes": int(summary.get("text_bytes", 0)),
+                "text_truncated": bool(summary.get("text_truncated", False)),
+                "screenshot_bytes": int(summary.get("screenshot_bytes", 0)),
+            },
+        )
+        del follows[self.recent_limit :]
+
     def _push_recent_request(self, event: dict[str, Any]):
         recent = self._snapshot["recent_requests"]
         recent.insert(
@@ -417,6 +464,24 @@ class TrustedStateManager:
             self._snapshot["browser"]["counters"]["browser_render_total"] += 1
             self._snapshot["browser"]["counters"]["browser_render_errors"] += 1
             self._push_recent_render(event)
+        elif event_type == "browser_follow_href":
+            self._snapshot["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["counters"]["browser_follow_href_success"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_success"] += 1
+            self._push_recent_follow(event)
+        elif event_type == "browser_follow_href_denied":
+            self._snapshot["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["counters"]["browser_follow_href_denied"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_denied"] += 1
+            self._push_recent_follow(event)
+        elif event_type == "browser_follow_href_error":
+            self._snapshot["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["counters"]["browser_follow_href_errors"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_total"] += 1
+            self._snapshot["browser"]["counters"]["browser_follow_href_errors"] += 1
+            self._push_recent_follow(event)
         elif event_type == "status_query":
             self._snapshot["counters"]["status_queries"] += 1
         elif event_type == "agent_run":
@@ -446,27 +511,29 @@ class TrustedStateManager:
         outcome: str,
         summary: dict[str, Any],
     ):
-        self._rebuild_from_log(write_snapshot=False)
-        event = {
-            "timestamp": utc_now_iso(),
-            "event_type": event_type,
-            "request_id": request_id,
-            "trace_id": trace_id,
-            "actor": actor,
-            "source_service": source_service,
-            "outcome": outcome,
-            "summary": summary,
-        }
-        self.canonical_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.canonical_log_path.open("a", encoding="ascii") as handle:
-            handle.write(json.dumps(event, sort_keys=True))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        self._apply_event(event)
-        self._write_snapshot()
+        with self._file_lock():
+            self._rebuild_from_log(write_snapshot=False)
+            event = {
+                "timestamp": utc_now_iso(),
+                "event_type": event_type,
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "actor": actor,
+                "source_service": source_service,
+                "outcome": outcome,
+                "summary": summary,
+            }
+            self.canonical_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.canonical_log_path.open("a", encoding="ascii") as handle:
+                handle.write(json.dumps(event, sort_keys=True))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._apply_event(event)
+            self._write_snapshot()
 
     def snapshot(self, *, refresh: bool = False) -> dict[str, Any]:
         if refresh:
-            self._rebuild_from_log()
+            with self._file_lock():
+                self._rebuild_from_log()
         return json.loads(json.dumps(self._snapshot))

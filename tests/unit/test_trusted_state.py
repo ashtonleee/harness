@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 from pathlib import Path
 
 from trusted.state.store import TrustedStateManager
@@ -10,6 +11,39 @@ def load_lines(path: Path) -> list[dict]:
         for line in path.read_text(encoding="ascii").splitlines()
         if line.strip()
     ]
+
+
+def _append_events_worker(
+    log_path: str,
+    state_path: str,
+    start_event,
+    error_queue,
+    worker_id: int,
+    count: int,
+):
+    manager = TrustedStateManager(
+        canonical_log_path=Path(log_path),
+        operational_state_path=Path(state_path),
+        budget_total=100,
+        budget_unit="mock_tokens",
+        stage="stage6_read_only_browser",
+        surfaces={"canonical_logging": "active_canonical_event_log"},
+    )
+    start_event.wait()
+    try:
+        for index in range(count):
+            event_id = f"worker-{worker_id}-event-{index}"
+            manager.append_event(
+                event_type="status_query",
+                actor="agent",
+                source_service="bridge",
+                request_id=event_id,
+                trace_id=event_id,
+                outcome="success",
+                summary={"query": "status", "worker_id": worker_id, "index": index},
+            )
+    except Exception as exc:
+        error_queue.put(f"{type(exc).__name__}: {exc}")
 
 
 def test_trusted_state_manager_materializes_operational_state_from_canonical_log(tmp_path):
@@ -257,3 +291,113 @@ def test_trusted_state_manager_materializes_browser_render_state(tmp_path):
     assert snapshot["browser"]["counters"]["browser_render_success"] == 1
     assert snapshot["browser"]["recent_renders"][0]["request_id"] == "req-browser"
     assert snapshot["browser"]["recent_renders"][0]["page_title"] == "Example Domain"
+
+
+def test_trusted_state_manager_materializes_browser_follow_state(tmp_path):
+    log_path = tmp_path / "logs" / "bridge_events.jsonl"
+    state_path = tmp_path / "state" / "operational_state.json"
+    manager = TrustedStateManager(
+        canonical_log_path=log_path,
+        operational_state_path=state_path,
+        budget_total=30,
+        budget_unit="mock_tokens",
+        stage="stage6_read_only_browser",
+        surfaces={
+            "canonical_logging": "active_canonical_event_log",
+            "budgeting": "enforced_token_cap_stage2",
+            "recovery": "trusted_host_checkpoint_controls_stage4",
+            "read_only_web": "trusted_fetcher_stage5_read_only_get",
+            "browser": "trusted_browser_stage6a_read_only_render",
+            "browser_follow_href": "trusted_browser_stage6b_safe_follow_href",
+        },
+        browser_defaults={
+            "service": {
+                "url": "http://browser:8083",
+                "reachable": True,
+                "detail": None,
+                "checked_at": "2026-03-12T00:00:00+00:00",
+            },
+            "caps": {
+                "viewport_width": 1280,
+                "viewport_height": 720,
+                "timeout_seconds": 10.0,
+                "settle_time_ms": 500,
+                "max_rendered_text_bytes": 16384,
+                "max_screenshot_bytes": 1048576,
+                "max_follow_hops": 1,
+                "max_followable_links": 20,
+            },
+        },
+    )
+
+    manager.append_event(
+        event_type="browser_follow_href",
+        actor="agent",
+        source_service="bridge",
+        request_id="req-follow",
+        trace_id="trace-follow",
+        outcome="success",
+        summary={
+            "source_url": "http://allowed.test/browser/follow-source",
+            "source_final_url": "http://allowed.test/browser/follow-source",
+            "requested_target_url": "http://allowed.test/browser/follow-target",
+            "matched_link_text": "Follow same origin target",
+            "follow_hop_count": 1,
+            "navigation_history": [
+                "http://allowed.test/browser/follow-source",
+                "http://allowed.test/browser/follow-target",
+            ],
+            "normalized_url": "http://allowed.test/browser/follow-target",
+            "final_url": "http://allowed.test/browser/follow-target",
+            "host": "allowed.test",
+            "allowlist_decision": "allowed",
+            "redirect_chain": [],
+            "observed_hosts": ["allowed.test"],
+            "resolved_ips": ["172.24.0.5"],
+            "http_status": 200,
+            "page_title": "Stage 6B Same Origin Target",
+            "text_bytes": 120,
+            "text_truncated": False,
+            "screenshot_bytes": 512,
+            "screenshot_sha256": "follow-image-hash",
+            "rendered_text_sha256": "follow-text-hash",
+        },
+    )
+
+    snapshot = manager.snapshot()
+    assert snapshot["browser"]["counters"]["browser_follow_href_total"] == 1
+    assert snapshot["browser"]["counters"]["browser_follow_href_success"] == 1
+    assert snapshot["browser"]["recent_follows"][0]["request_id"] == "req-follow"
+    assert snapshot["browser"]["recent_follows"][0]["source_url"] == "http://allowed.test/browser/follow-source"
+    assert snapshot["browser"]["recent_follows"][0]["final_url"] == "http://allowed.test/browser/follow-target"
+
+
+def test_trusted_state_manager_serializes_concurrent_appends(tmp_path):
+    log_path = tmp_path / "logs" / "bridge_events.jsonl"
+    state_path = tmp_path / "state" / "operational_state.json"
+    ctx = multiprocessing.get_context("spawn")
+    start_event = ctx.Event()
+    error_queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_append_events_worker,
+            args=(str(log_path), str(state_path), start_event, error_queue, worker_id, 12),
+        )
+        for worker_id in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+
+    assert error_queue.empty()
+    events = load_lines(log_path)
+    assert len(events) == 48
+    assert all(event["event_type"] == "status_query" for event in events)
+
+    snapshot = json.loads(state_path.read_text(encoding="ascii"))
+    assert snapshot["counters"]["status_queries"] == 48
+    assert len(snapshot["recent_requests"]) <= 12

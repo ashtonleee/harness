@@ -110,11 +110,27 @@ class BrowserRenderRecord(BaseModel):
     screenshot_bytes: int = 0
 
 
+class BrowserFollowRecord(BaseModel):
+    timestamp: str
+    request_id: str
+    trace_id: str
+    outcome: str
+    source_url: str
+    requested_target_url: str
+    final_url: str
+    http_status: int | None = None
+    page_title: str = ""
+    text_bytes: int = 0
+    text_truncated: bool = False
+    screenshot_bytes: int = 0
+
+
 class BrowserState(BaseModel):
     service: ConnectionStatus
     caps: dict[str, int | float]
     counters: dict[str, int]
     recent_renders: list[BrowserRenderRecord]
+    recent_follows: list[BrowserFollowRecord] = Field(default_factory=list)
 
 
 class BridgeStatusReport(BaseModel):
@@ -229,7 +245,48 @@ class BrowserRenderRequest(BaseModel):
     url: str
 
 
+class BrowserFollowLink(BaseModel):
+    text: str
+    target_url: str
+    same_origin: bool
+
+
 class BrowserRenderInternalResponse(BaseModel):
+    normalized_url: str
+    final_url: str
+    http_status: int | None = None
+    page_title: str
+    meta_description: str
+    rendered_text: str
+    rendered_text_sha256: str
+    text_bytes: int
+    text_truncated: bool
+    screenshot_png_base64: str
+    screenshot_sha256: str
+    screenshot_bytes: int
+    redirect_chain: list[str]
+    observed_hosts: list[str]
+    resolved_ips: list[str]
+    followable_links: list[BrowserFollowLink] = Field(default_factory=list)
+
+
+class BrowserRenderResponse(BrowserRenderInternalResponse):
+    request_id: str
+    trace_id: str
+
+
+class BrowserFollowHrefRequest(BaseModel):
+    source_url: str
+    target_url: str
+
+
+class BrowserFollowHrefInternalResponse(BaseModel):
+    source_url: str
+    source_final_url: str
+    requested_target_url: str
+    matched_link_text: str
+    follow_hop_count: int
+    navigation_history: list[str]
     normalized_url: str
     final_url: str
     http_status: int | None = None
@@ -247,6 +304,6 @@ class BrowserRenderInternalResponse(BaseModel):
     resolved_ips: list[str]
 
 
-class BrowserRenderResponse(BrowserRenderInternalResponse):
+class BrowserFollowHrefResponse(BrowserFollowHrefInternalResponse):
     request_id: str
     trace_id: str

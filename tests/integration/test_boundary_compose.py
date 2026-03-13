@@ -74,14 +74,16 @@ def compose_http_response(
     *,
     env: dict[str, str],
     payload: dict | None = None,
+    headers: dict | None = None,
 ) -> dict:
     code = (
         "import httpx, json\n"
         f"method = {method!r}\n"
         f"url = {url!r}\n"
         f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
         "with httpx.Client(timeout=10.0) as client:\n"
-        "    response = client.request(method, url, json=json.loads(payload) if payload else None)\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
         "body = None\n"
         "try:\n"
         "    body = response.json()\n"
@@ -182,6 +184,7 @@ def test_compose_stack_starts_and_reports_litellm_health(compose_stack):
 
     events = load_events()
     assert any(event["event_type"] == "status_query" for event in events)
+    assert any(event["event_type"] == "status_query" and event["actor"] == "unauthenticated_bridge_client" for event in events)
 
 
 def test_boundary_denies_direct_egress_and_allows_bridge_mediated_llm(compose_stack):
@@ -387,7 +390,13 @@ def test_agent_can_query_status_but_cannot_modify_trusted_state(compose_stack):
         "    handle.write('{\"event_type\":\"agent_fake\"}\\n')\n"
         "state_path.write_text(json.dumps({'budget': 'mutated'}), encoding='ascii')\n"
     )
-    compose_exec("agent", ["python", "-c", write_attempt], env=compose_stack)
+    blocked = compose_exec(
+        "agent",
+        ["python", "-c", write_attempt],
+        env=compose_stack,
+        check=False,
+    )
+    assert blocked.returncode != 0
     assert LOG_PATH.read_text(encoding="ascii") == host_log_before
     assert STATE_PATH.read_text(encoding="ascii") == host_state_before
 
@@ -399,6 +408,66 @@ def test_agent_can_query_status_but_cannot_modify_trusted_state(compose_stack):
         payload={"budget": "tamper"},
     )
     assert mutate["status_code"] == 405
+
+
+def test_spoofed_actor_headers_do_not_change_canonical_actor_and_runtime_root_is_read_only(compose_stack):
+    status = compose_http_response(
+        "agent",
+        "GET",
+        "http://bridge:8000/status",
+        env=compose_stack,
+        headers={"x-rsi-actor": "operator"},
+    )
+    assert status["status_code"] == 200
+
+    events = load_events()
+    assert any(
+        event["event_type"] == "status_query"
+        and event["request_id"] == status["headers"]["x-request-id"]
+        and event["actor"] == "unauthenticated_bridge_client"
+        for event in events
+    )
+
+    reported = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/agent/runs/events",
+        env=compose_stack,
+        headers={"x-rsi-actor": "operator"},
+        payload={
+            "run_id": "actor-spoof-run",
+            "event_kind": "run_start",
+            "step_index": None,
+            "tool_name": None,
+            "summary": {"task": "actor spoof hardening"},
+        },
+    )
+    assert reported["status_code"] == 200
+    events = load_events()
+    assert any(
+        event["event_type"] == "agent_run"
+        and event["request_id"] == reported["headers"]["x-request-id"]
+        and event["actor"] == "agent"
+        for event in events
+    )
+
+    runtime_write = (
+        "from pathlib import Path\n"
+        "import json\n"
+        "workspace = Path('/workspace/agent/h1_boundary_probe.txt')\n"
+        "workspace.write_text('ok\\n', encoding='utf-8')\n"
+        "payload = {'workspace_exists': workspace.exists()}\n"
+        "try:\n"
+        "    Path('/app/untrusted/h1_boundary_probe.txt').write_text('bad\\n', encoding='utf-8')\n"
+        "    payload['runtime_write'] = 'succeeded'\n"
+        "except Exception as exc:\n"
+        "    payload['runtime_write'] = type(exc).__name__\n"
+        "print(json.dumps(payload))\n"
+    )
+    probe = compose_exec("agent", ["python", "-c", runtime_write], env=compose_stack)
+    probe_payload = json.loads(probe.stdout)
+    assert probe_payload["workspace_exists"] is True
+    assert probe_payload["runtime_write"] != "succeeded"
 
 
 def test_operational_state_persists_across_bridge_restart(compose_stack):

@@ -84,12 +84,16 @@ class RunState:
     last_bridge_chat: dict[str, Any] | None = None
     last_web_fetch: dict[str, Any] | None = None
     last_browser_render: dict[str, Any] | None = None
+    last_browser_follow: dict[str, Any] | None = None
 
     def template_context(self) -> dict[str, Any]:
         status = self.last_bridge_status or {}
         chat = self.last_bridge_chat or {}
         fetch = self.last_web_fetch or {}
         browser = self.last_browser_render or {}
+        browser_follow = self.last_browser_follow or {}
+        followable_links = browser.get("followable_links", [])
+        first_followable = followable_links[0] if followable_links else {}
         return {
             "task": self.task,
             "run_id": self.run_id,
@@ -110,6 +114,16 @@ class RunState:
             "last_browser_meta_description": browser.get("meta_description", ""),
             "last_browser_text_preview": browser.get("text_preview", ""),
             "last_browser_screenshot_base64": browser.get("screenshot_png_base64", ""),
+            "last_browser_first_followable_target_url": first_followable.get("target_url", ""),
+            "last_browser_first_followable_text": first_followable.get("text", ""),
+            "last_browser_follow_request_id": browser_follow.get("request_id", ""),
+            "last_browser_follow_trace_id": browser_follow.get("trace_id", ""),
+            "last_browser_follow_source_url": browser_follow.get("source_url", ""),
+            "last_browser_follow_requested_target_url": browser_follow.get("requested_target_url", ""),
+            "last_browser_follow_final_url": browser_follow.get("final_url", ""),
+            "last_browser_follow_title": browser_follow.get("page_title", ""),
+            "last_browser_follow_text_preview": browser_follow.get("text_preview", ""),
+            "last_browser_follow_screenshot_base64": browser_follow.get("screenshot_png_base64", ""),
         }
 
 
@@ -191,6 +205,20 @@ class SeedRunner:
                 "screenshot_sha256": result["screenshot_sha256"],
                 "screenshot_bytes": result["screenshot_bytes"],
             }
+        if action_kind == "bridge_browser_follow_href":
+            return {
+                "request_id": result["request_id"],
+                "trace_id": result["trace_id"],
+                "source_url": result["source_url"],
+                "requested_target_url": result["requested_target_url"],
+                "final_url": result["final_url"],
+                "http_status": result["http_status"],
+                "page_title": result["page_title"],
+                "text_bytes": result["text_bytes"],
+                "text_truncated": result["text_truncated"],
+                "screenshot_sha256": result["screenshot_sha256"],
+                "screenshot_bytes": result["screenshot_bytes"],
+            }
         return result
 
     async def _execute_action(self, action: PlanAction, state: RunState) -> dict[str, Any]:
@@ -249,10 +277,50 @@ class SeedRunner:
                 "meta_description": response.meta_description,
                 "text_preview": response.rendered_text[:200],
                 "screenshot_png_base64": response.screenshot_png_base64,
+                "followable_links": [link.model_dump() for link in response.followable_links],
             }
             return {
                 "request_id": response.request_id,
                 "trace_id": response.trace_id,
+                "normalized_url": response.normalized_url,
+                "final_url": response.final_url,
+                "http_status": response.http_status,
+                "page_title": response.page_title,
+                "meta_description": response.meta_description,
+                "text_bytes": response.text_bytes,
+                "text_truncated": response.text_truncated,
+                "content_preview": response.rendered_text[:200],
+                "screenshot_sha256": response.screenshot_sha256,
+                "screenshot_bytes": response.screenshot_bytes,
+                "followable_links": [link.model_dump() for link in response.followable_links],
+            }
+
+        if action.kind == "bridge_browser_follow_href":
+            source_url = self._resolve_text(action.params["source_url"], state)
+            target_url = self._resolve_text(action.params["target_url"], state)
+            response = await self.bridge_client.browser_follow_href(
+                source_url=source_url,
+                target_url=target_url,
+            )
+            state.last_browser_follow = {
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "source_url": response.source_url,
+                "requested_target_url": response.requested_target_url,
+                "final_url": response.final_url,
+                "page_title": response.page_title,
+                "text_preview": response.rendered_text[:200],
+                "screenshot_png_base64": response.screenshot_png_base64,
+            }
+            return {
+                "request_id": response.request_id,
+                "trace_id": response.trace_id,
+                "source_url": response.source_url,
+                "source_final_url": response.source_final_url,
+                "requested_target_url": response.requested_target_url,
+                "matched_link_text": response.matched_link_text,
+                "follow_hop_count": response.follow_hop_count,
+                "navigation_history": list(response.navigation_history),
                 "normalized_url": response.normalized_url,
                 "final_url": response.final_url,
                 "http_status": response.http_status,
