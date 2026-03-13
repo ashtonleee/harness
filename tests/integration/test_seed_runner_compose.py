@@ -111,6 +111,17 @@ def test_seed_runner_uses_workspace_mount_and_bridge_surfaces(compose_stack):
     assert probe_payload["workspace_has_seedlib"] is True
     assert probe_payload["runtime_has_seed_runner"] is True
 
+    health_probe = (
+        "import httpx, json\n"
+        "r = httpx.get('http://127.0.0.1:8001/healthz', timeout=5.0)\n"
+        "r.raise_for_status()\n"
+        "print(json.dumps(r.json()))\n"
+    )
+    health = compose_exec("agent", ["python", "-c", health_probe], env=compose_stack)
+    health_body = json.loads(health.stdout)
+    assert health_body["details"]["workspace_writable"] is True
+    assert health_body["details"]["runtime_code_writable"] is False
+
     result = compose_exec(
         "agent",
         [
@@ -155,7 +166,7 @@ def test_seed_runner_uses_workspace_mount_and_bridge_surfaces(compose_stack):
         for event in events
     )
     assert any(
-        event["event_type"] == "status_query" and event["actor"] == "agent"
+        event["event_type"] == "status_query" and event["actor"] == "unauthenticated_bridge_client"
         for event in events
     )
     assert any(

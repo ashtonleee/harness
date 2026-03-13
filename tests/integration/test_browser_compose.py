@@ -15,14 +15,16 @@ STATE_PATH = ROOT / "runtime" / "trusted_state" / "state" / "operational_state.j
 WORKSPACE_ROOT = ROOT / "untrusted" / "agent_workspace"
 REPORT_PATH = WORKSPACE_ROOT / "reports" / "stage6_browser_report.md"
 SCREENSHOT_PATH = WORKSPACE_ROOT / "reports" / "stage6_browser_screenshot.png"
+FOLLOW_REPORT_PATH = WORKSPACE_ROOT / "reports" / "stage6b_browser_follow_report.md"
+FOLLOW_SCREENSHOT_PATH = WORKSPACE_ROOT / "reports" / "stage6b_browser_follow_screenshot.png"
 
 
 def docker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["COMPOSE_PROJECT_NAME"] = COMPOSE_PROJECT
     env["RSI_LLM_BUDGET_TOKEN_CAP"] = "120"
-    env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test"
-    env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test"
+    env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test,allowed-two.test"
+    env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test,allowed-two.test"
     return env
 
 
@@ -116,6 +118,35 @@ def expect_failure_via_agent(target_url: str, env: dict[str, str]):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def remove_project_containers(*, env: dict[str, str]):
+    result = run_command(
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            f"name={COMPOSE_PROJECT}",
+        ],
+        env=env,
+        check=False,
+    )
+    container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if container_ids:
+        run_command(["docker", "rm", "-f", *container_ids], env=env, check=False)
+
+
+def compose_up_with_retry(*, env: dict[str, str]):
+    try:
+        compose_command(["up", "--build", "-d", "--wait"], env=env)
+        return
+    except subprocess.CalledProcessError as exc:
+        if "No such container" not in exc.stderr:
+            raise
+        compose_command(["down", "--remove-orphans", "--volumes"], env=env, check=False)
+        remove_project_containers(env=env)
+        compose_command(["up", "--build", "-d", "--wait"], env=env)
+
+
 @pytest.fixture(scope="module")
 def compose_stack():
     env = docker_env()
@@ -124,6 +155,7 @@ def compose_stack():
         pytest.fail("Docker daemon is required for Stage 6 browser tests")
 
     compose_command(["down", "--remove-orphans", "--volumes"], env=env, check=False)
+    remove_project_containers(env=env)
     if LOG_PATH.exists():
         LOG_PATH.unlink()
     if STATE_PATH.exists():
@@ -132,9 +164,10 @@ def compose_stack():
         shutil.rmtree(REPORT_PATH.parent)
     run_command(["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"], env=env)
 
-    compose_command(["up", "--build", "-d", "--wait"], env=env)
+    compose_up_with_retry(env=env)
     yield env
     compose_command(["down", "--remove-orphans", "--volumes"], env=env, check=False)
+    remove_project_containers(env=env)
     run_command(["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"], env=env)
 
 
@@ -158,6 +191,7 @@ def test_browser_render_succeeds_only_through_trusted_path(compose_stack):
     assert "Stage 6 fixture rendered body" in body["rendered_text"]
     assert body["request_id"]
     assert body["trace_id"]
+    assert isinstance(body["followable_links"], list)
     screenshot = base64.b64decode(body["screenshot_png_base64"])
     assert screenshot.startswith(b"\x89PNG\r\n\x1a\n")
 
@@ -176,6 +210,55 @@ def test_browser_render_succeeds_only_through_trusted_path(compose_stack):
     assert event["summary"]["screenshot_sha256"]
     assert "Stage 6 fixture rendered body" not in json.dumps(event)
     assert body["screenshot_png_base64"] not in json.dumps(event)
+
+
+def test_browser_container_runs_non_root_without_unsafe_sandbox_flags(compose_stack):
+    runtime_probe = (
+        "import json, os\n"
+        "self_pid = str(os.getpid())\n"
+        "cmdlines = []\n"
+        "for entry in os.listdir('/proc'):\n"
+        "    if not entry.isdigit():\n"
+        "        continue\n"
+        "    if entry == self_pid:\n"
+        "        continue\n"
+        "    exe_path = f'/proc/{entry}/exe'\n"
+        "    try:\n"
+        "        exe = os.path.basename(os.readlink(exe_path))\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if exe not in {'chrome', 'chromium', 'headless_shell'}:\n"
+        "        continue\n"
+        "    path = f'/proc/{entry}/cmdline'\n"
+        "    try:\n"
+        "        raw = open(path, 'rb').read().replace(b'\\x00', b' ').decode('utf-8', errors='ignore')\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    cmdlines.append(raw)\n"
+        "joined = '\\n'.join(cmdlines)\n"
+        "payload = {\n"
+        "    'euid': os.geteuid(),\n"
+        "    'unsafe_flag_seen': ('--no-sandbox' in joined) or ('--disable-setuid-sandbox' in joined),\n"
+        "}\n"
+        "print(json.dumps(payload))\n"
+    )
+    probe = compose_exec("browser", ["python", "-c", runtime_probe], env=compose_stack)
+    payload = json.loads(probe.stdout)
+    assert payload["euid"] != 0
+    assert payload["unsafe_flag_seen"] is False
+
+    health = compose_http_response(
+        "browser",
+        "GET",
+        "http://127.0.0.1:8083/healthz",
+        env=compose_stack,
+    )
+    assert health["status_code"] == 200
+    body = health["json"]
+    assert body["details"]["running_as_root"] is False
+    assert body["details"]["chromium_sandbox"] is True
+    assert "--no-sandbox" not in body["details"]["launch_args"]
+    assert "--disable-setuid-sandbox" not in body["details"]["launch_args"]
 
 
 def test_browser_fails_closed_and_status_exposes_browser_state(compose_stack):
@@ -207,6 +290,127 @@ def test_browser_fails_closed_and_status_exposes_browser_state(compose_stack):
 
     events = load_events()
     assert any(event["event_type"] == "browser_render_denied" for event in events)
+
+    probe_response = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/debug/probes/public-egress",
+        env=compose_stack,
+    )
+    assert probe_response["status_code"] == 404
+
+
+def test_browser_follow_href_succeeds_only_through_trusted_path(compose_stack):
+    source_url = "http://allowed.test/browser/follow-source"
+    source = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/render",
+        env=compose_stack,
+        payload={"url": source_url},
+    )
+    assert source["status_code"] == 200
+    links = source["json"]["followable_links"]
+    same_origin = next(
+        link for link in links if link["target_url"] == "http://allowed.test/browser/follow-target"
+    )
+    cross_origin = next(
+        link
+        for link in links
+        if link["target_url"] == "http://allowed-two.test/browser/cross-origin-target"
+    )
+    assert same_origin["same_origin"] is True
+    assert cross_origin["same_origin"] is False
+
+    same_response = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/follow-href",
+        env=compose_stack,
+        payload={"source_url": source_url, "target_url": same_origin["target_url"]},
+    )
+    assert same_response["status_code"] == 200
+    same_body = same_response["json"]
+    assert same_body["final_url"] == "http://allowed.test/browser/follow-target"
+    assert same_body["source_final_url"] == source_url
+    assert same_body["follow_hop_count"] == 1
+    assert same_body["navigation_history"] == [
+        source_url,
+        "http://allowed.test/browser/follow-target",
+    ]
+    assert same_body["page_title"] == "Stage 6B Same Origin Target"
+    assert base64.b64decode(same_body["screenshot_png_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
+
+    cross_response = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/follow-href",
+        env=compose_stack,
+        payload={"source_url": source_url, "target_url": cross_origin["target_url"]},
+    )
+    assert cross_response["status_code"] == 200
+    cross_body = cross_response["json"]
+    assert cross_body["final_url"] == "http://allowed-two.test/browser/cross-origin-target"
+    assert cross_body["navigation_history"] == [
+        source_url,
+        "http://allowed-two.test/browser/cross-origin-target",
+    ]
+
+    events = load_events()
+    matched = [
+        event
+        for event in events
+        if event["event_type"] == "browser_follow_href"
+        and event["request_id"] == same_body["request_id"]
+        and event["trace_id"] == same_body["trace_id"]
+    ]
+    assert matched
+    event = matched[0]
+    assert event["summary"]["requested_target_url"] == "http://allowed.test/browser/follow-target"
+    assert event["summary"]["navigation_history"] == [
+        source_url,
+        "http://allowed.test/browser/follow-target",
+    ]
+    assert event["summary"]["screenshot_sha256"]
+    assert same_body["screenshot_png_base64"] not in json.dumps(event)
+    assert same_body["rendered_text"] not in json.dumps(event)
+
+
+def test_browser_follow_href_fails_closed_and_status_exposes_follow_state(compose_stack):
+    source_url = "http://allowed.test/browser/follow-source"
+    denied_cases = [
+        "http://allowed.test/browser/not-linked",
+        "http://blocked.test/browser/rendered",
+        "http://allowed.test/browser/follow-blocked-subresource",
+        "http://allowed.test/browser/follow-popup-target",
+        "http://allowed.test/browser/follow-download-target",
+        "http://allowed.test/browser/follow-meta-refresh-target",
+        "http://allowed.test/browser/follow-redirect-blocked-target",
+    ]
+    for target_url in denied_cases:
+        response = compose_http_response(
+            "agent",
+            "POST",
+            "http://bridge:8000/web/browser/follow-href",
+            env=compose_stack,
+            payload={"source_url": source_url, "target_url": target_url},
+        )
+        assert response["status_code"] == 403
+
+    status = compose_http_response(
+        "agent",
+        "GET",
+        "http://bridge:8000/status",
+        env=compose_stack,
+    )["json"]
+    assert status["browser"]["service"]["reachable"] is True
+    assert status["browser"]["counters"]["browser_follow_href_total"] >= 1
+    assert status["browser"]["caps"]["max_follow_hops"] == 1
+    assert status["browser"]["caps"]["max_followable_links"] == 20
+    assert status["surfaces"]["browser_follow_href"] == "trusted_browser_stage6b_safe_follow_href"
+
+    events = load_events()
+    assert any(event["event_type"] == "browser_follow_href_denied" for event in events)
 
     probe_response = compose_http_response(
         "agent",
@@ -255,3 +459,45 @@ def test_seed_runner_browser_demo_writes_artifacts_and_recovery_resets_them(comp
 
     state = load_state()
     assert state["browser"]["counters"]["browser_render_success"] >= 1
+
+
+def test_seed_runner_browser_follow_demo_writes_artifacts_and_recovery_resets_them(compose_stack):
+    result = compose_exec(
+        "agent",
+        [
+            "python",
+            "-m",
+            "untrusted.agent.seed_runner",
+            "--task",
+            "follow one safe href and write a browser report",
+            "--planner",
+            "scripted",
+            "--script",
+            ".seed_plans/stage6b_browser_follow_demo.json",
+            "--max-steps",
+            "10",
+        ],
+        env=compose_stack,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert FOLLOW_REPORT_PATH.exists()
+    assert FOLLOW_SCREENSHOT_PATH.exists()
+    report = FOLLOW_REPORT_PATH.read_text(encoding="utf-8")
+    assert "http://allowed.test/browser/follow-source" in report
+    assert "http://allowed.test/browser/follow-target" in report
+    assert "Stage 6B Same Origin Target" in report
+    assert "request_id=" in report
+    assert "trace_id=" in report
+    assert FOLLOW_SCREENSHOT_PATH.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+    reset = run_command(
+        ["./scripts/recovery.sh", "reset-workspace-to-seed-baseline"],
+        env=compose_stack,
+    )
+    assert reset.returncode == 0
+    assert not FOLLOW_REPORT_PATH.exists()
+    assert not FOLLOW_SCREENSHOT_PATH.exists()
+
+    state = load_state()
+    assert state["browser"]["counters"]["browser_follow_href_success"] >= 1

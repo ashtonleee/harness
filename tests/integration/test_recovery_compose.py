@@ -164,7 +164,13 @@ def test_recovery_controls_revert_workspace_and_update_trusted_state(compose_sta
         "path.write_text('agent mutation', encoding='ascii')\n"
         "print(path.exists())\n"
     )
-    compose_exec("agent", ["python", "-c", agent_write_attempt], env=compose_stack)
+    blocked = compose_exec(
+        "agent",
+        ["python", "-c", agent_write_attempt],
+        env=compose_stack,
+        check=False,
+    )
+    assert blocked.returncode != 0
     host_checkpoint_paths_after = sorted(
         path.relative_to(CHECKPOINT_DIR).as_posix()
         for path in CHECKPOINT_DIR.rglob("*")
@@ -233,3 +239,39 @@ def test_recovery_artifacts_survive_compose_down_up(compose_stack):
         item["checkpoint_id"] == checkpoint_id
         for item in status["recovery"]["available_checkpoints"]
     )
+
+
+def test_recovery_cli_and_bridge_requests_do_not_corrupt_canonical_state(compose_stack):
+    bridge_burst = (
+        "import httpx\n"
+        "with httpx.Client(base_url='http://bridge:8000', timeout=5.0) as client:\n"
+        "    for _ in range(12):\n"
+        "        response = client.get('/status')\n"
+        "        response.raise_for_status()\n"
+    )
+    process = subprocess.Popen(
+        ["docker", "compose", "exec", "-T", "agent", "python", "-c", bridge_burst],
+        cwd=ROOT,
+        env=compose_stack,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    checkpoint = run_recovery("create-checkpoint", "--label", "concurrent-bridge")
+    stdout, stderr = process.communicate(timeout=20)
+    assert process.returncode == 0, stdout + stderr
+    assert checkpoint["checkpoint_id"]
+
+    events = load_events()
+    assert any(
+        event["event_type"] == "checkpoint_created"
+        and event["summary"]["checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+        for event in events
+    )
+    assert any(event["event_type"] == "status_query" for event in events)
+    assert all(event["request_id"] for event in events)
+    assert all(event["trace_id"] for event in events)
+
+    state = load_state()
+    assert state["counters"]["status_queries"] >= 12
+    assert state["recovery"]["latest_checkpoint_id"] == checkpoint["checkpoint_id"]

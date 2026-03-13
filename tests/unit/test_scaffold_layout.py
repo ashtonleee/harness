@@ -46,11 +46,17 @@ def test_compose_preserves_trusted_untrusted_boundary():
     assert not browser_volumes
 
     assert not agent.get("ports"), agent.get("ports")
+    assert agent.get("read_only") is True
+    assert "/tmp" in agent.get("tmpfs", [])
     assert "healthcheck" in bridge
     assert "healthcheck" in agent
     assert "healthcheck" in litellm
     assert "healthcheck" in fetcher
     assert "healthcheck" in browser
+    assert "/tmp" in browser.get("tmpfs", [])
+    browser_security = browser.get("security_opt", [])
+    assert "no-new-privileges:true" in browser_security
+    assert any(item.startswith("seccomp=") for item in browser_security)
 
 
 def test_compose_uses_expected_network_topology():

@@ -5,4 +5,5 @@ __pycache__/
 *.egg-info/
 runtime/trusted_state/logs/*.jsonl
 runtime/trusted_state/state/*.json
+runtime/trusted_state/state/*.lock
 runtime/trusted_state/checkpoints/

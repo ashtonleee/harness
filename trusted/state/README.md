@@ -23,4 +23,13 @@ Stage 5 adds trusted-observed web fetch events:
 - `web_fetch_denied`
 - `web_fetch_error`
 
-Only trusted services and trusted host-side operator scripts write these files. The agent sees them only through bridge read-only status surfaces, the narrow append-only run-report endpoint, and the safe bridge-owned `/web/fetch` route.
+Stage 6 adds trusted-observed browser events:
+
+- `browser_render`
+- `browser_render_denied`
+- `browser_render_error`
+- `browser_follow_href`
+- `browser_follow_href_denied`
+- `browser_follow_href_error`
+
+Only trusted services and trusted host-side operator scripts write these files. The agent sees them only through bridge read-only status surfaces, the narrow append-only run-report endpoint, and the safe bridge-owned `/web/fetch`, `/web/browser/render`, and `/web/browser/follow-href` routes.

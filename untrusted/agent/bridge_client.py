@@ -8,6 +8,8 @@ from shared.config import DEFAULT_BRIDGE_URL
 from shared.schemas import (
     AgentRunEventReceipt,
     AgentRunEventRequest,
+    BrowserFollowHrefRequest,
+    BrowserFollowHrefResponse,
     BrowserRenderRequest,
     BrowserRenderResponse,
     BridgeStatusReport,
@@ -23,7 +25,7 @@ from shared.schemas import (
 class BridgeClient:
     def __init__(self, bridge_url: str):
         self.bridge_url = bridge_url.rstrip("/")
-        self.headers = {"x-rsi-actor": "agent"}
+        self.headers: dict[str, str] = {}
 
     async def health(self) -> HealthReport:
         async with httpx.AsyncClient(base_url=self.bridge_url, timeout=5.0) as client:
@@ -72,6 +74,22 @@ class BridgeClient:
             )
             response.raise_for_status()
         return BrowserRenderResponse.model_validate(response.json())
+
+    async def browser_follow_href(
+        self,
+        *,
+        source_url: str,
+        target_url: str,
+    ) -> BrowserFollowHrefResponse:
+        payload = BrowserFollowHrefRequest(source_url=source_url, target_url=target_url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                "/web/browser/follow-href",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserFollowHrefResponse.model_validate(response.json())
 
     async def report_agent_event(
         self,
@@ -126,6 +144,10 @@ def main():
     browser_parser = subparsers.add_parser("browser-render")
     browser_parser.add_argument("--url", required=True)
 
+    browser_follow_parser = subparsers.add_parser("browser-follow-href")
+    browser_follow_parser.add_argument("--source-url", required=True)
+    browser_follow_parser.add_argument("--target-url", required=True)
+
     args = parser.parse_args()
     if args.command in (None, "health"):
         result = asyncio.run(probe_bridge(args.bridge_url))
@@ -145,6 +167,13 @@ def main():
     elif args.command == "browser-render":
         result = asyncio.run(
             BridgeClient(args.bridge_url).browser_render(url=args.url)
+        ).model_dump()
+    elif args.command == "browser-follow-href":
+        result = asyncio.run(
+            BridgeClient(args.bridge_url).browser_follow_href(
+                source_url=args.source_url,
+                target_url=args.target_url,
+            )
         ).model_dump()
     else:
         raise ValueError(f"unsupported command: {args.command}")

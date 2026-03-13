@@ -9,10 +9,22 @@ from untrusted.agent.bridge_client import probe_bridge
 from untrusted.agent.egress import attempt_egress
 
 
+def probe_writable(path) -> bool:
+    probe = path / ".agent_write_probe"
+    try:
+        probe.write_text("ok\n", encoding="ascii")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
 def run_startup_checks(app: FastAPI):
     settings = agent_settings()
     assert settings.workspace_dir != settings.runtime_code_dir
     settings.workspace_dir.mkdir(parents=True, exist_ok=True)
+    workspace_writable = probe_writable(settings.workspace_dir)
+    runtime_code_writable = probe_writable(settings.runtime_code_dir)
     app.state.settings = settings
     app.state.startup_checks = {
         "bridge_url_configured": True,
@@ -20,6 +32,8 @@ def run_startup_checks(app: FastAPI):
         "workspace_dir": str(settings.workspace_dir),
         "runtime_code_dir": str(settings.runtime_code_dir),
         "self_edit_target": str(settings.workspace_dir),
+        "workspace_writable": workspace_writable,
+        "runtime_code_writable": runtime_code_writable,
         "public_probe_url": settings.public_probe_url,
         "provider_probe_url": settings.provider_probe_url,
     }

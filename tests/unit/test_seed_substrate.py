@@ -1,12 +1,16 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 import pytest
 
 from shared.config import agent_settings
 from shared.schemas import (
     AgentRunEventReceipt,
+    BrowserFollowHrefResponse,
+    BrowserFollowLink,
     BrowserRenderResponse,
     BrowserState,
     BridgeStatusReport,
@@ -24,6 +28,7 @@ from shared.schemas import (
 from untrusted.agent.command_runner import BoundedCommandRunner
 from untrusted.agent.seed_runner import PlanAction, ScriptedPlanner, SeedRunner
 from untrusted.agent.workspace_tools import WorkspaceTools
+from untrusted.agent.app import app as agent_app
 
 
 class FakeBridgeClient:
@@ -32,6 +37,7 @@ class FakeBridgeClient:
         self.chat_calls = 0
         self.fetch_calls = 0
         self.browser_render_calls = 0
+        self.browser_follow_href_calls = 0
         self.reported_events: list[dict] = []
 
     async def status(self) -> BridgeStatusReport:
@@ -122,14 +128,21 @@ class FakeBridgeClient:
                     "settle_time_ms": 500,
                     "max_rendered_text_bytes": 16384,
                     "max_screenshot_bytes": 1048576,
+                    "max_follow_hops": 1,
+                    "max_followable_links": 20,
                 },
                 counters={
                     "browser_render_total": 0,
                     "browser_render_success": 0,
                     "browser_render_denied": 0,
                     "browser_render_errors": 0,
+                    "browser_follow_href_total": 0,
+                    "browser_follow_href_success": 0,
+                    "browser_follow_href_denied": 0,
+                    "browser_follow_href_errors": 0,
                 },
                 recent_renders=[],
+                recent_follows=[],
             ),
             counters={"status_queries": 1, "llm_calls_total": 1},
             recent_requests=[
@@ -146,6 +159,7 @@ class FakeBridgeClient:
             surfaces={
                 "seed_agent": "local_only_stage3_substrate",
                 "browser": "trusted_browser_stage6a_read_only_render",
+                "browser_follow_href": "trusted_browser_stage6b_safe_follow_href",
             },
         )
 
@@ -226,6 +240,46 @@ class FakeBridgeClient:
             redirect_chain=[],
             observed_hosts=["example.com"],
             resolved_ips=["93.184.216.34"],
+            followable_links=[
+                BrowserFollowLink(
+                    text="Follow same origin target",
+                    target_url="https://example.com/follow-target",
+                    same_origin=True,
+                )
+            ],
+        )
+
+    async def browser_follow_href(
+        self,
+        *,
+        source_url: str,
+        target_url: str,
+    ) -> BrowserFollowHrefResponse:
+        self.browser_follow_href_calls += 1
+        return BrowserFollowHrefResponse(
+            request_id="browser-follow-req-1",
+            trace_id="browser-follow-trace-1",
+            source_url=source_url,
+            source_final_url=source_url,
+            requested_target_url=target_url,
+            matched_link_text="Follow same origin target",
+            follow_hop_count=1,
+            navigation_history=[source_url, target_url],
+            normalized_url=target_url,
+            final_url=target_url,
+            http_status=200,
+            page_title="Fixture Browser Follow Title",
+            meta_description="Fixture browser follow description",
+            rendered_text="Rendered followed browser text preview",
+            rendered_text_sha256="follow-text-hash",
+            text_bytes=36,
+            text_truncated=False,
+            screenshot_png_base64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2Wb6wAAAAASUVORK5CYII=",
+            screenshot_sha256="follow-image-hash",
+            screenshot_bytes=67,
+            redirect_chain=[],
+            observed_hosts=["example.com"],
+            resolved_ips=["93.184.216.34"],
         )
 
 
@@ -276,6 +330,10 @@ def test_workspace_tools_cannot_escape_mutable_workspace(tmp_path):
 
 def test_bounded_command_runner_enforces_cwd_timeout_and_output_limit(tmp_path):
     runner = BoundedCommandRunner(tmp_path, default_timeout_seconds=1.0, output_limit_bytes=64)
+    env = runner._env()
+    assert env["HOME"] == "/tmp"
+    assert env["TMPDIR"] == "/tmp"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
 
     cwd_result = runner.run(["python", "-c", "from pathlib import Path; print(Path.cwd().name)"])
     assert cwd_result.returncode == 0
@@ -297,6 +355,27 @@ def test_bounded_command_runner_enforces_cwd_timeout_and_output_limit(tmp_path):
     )
     assert output_result.stdout_truncated is True
     assert len(output_result.stdout) <= 40
+
+
+def test_agent_health_reports_workspace_writable_and_runtime_code_read_only(monkeypatch, tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    runtime_code_dir = tmp_path / "runtime_code"
+    runtime_code_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    os.chmod(runtime_code_dir, 0o555)
+    monkeypatch.setenv("RSI_AGENT_WORKSPACE_DIR", str(workspace_dir))
+    monkeypatch.setenv("RSI_AGENT_RUNTIME_CODE_DIR", str(runtime_code_dir))
+
+    try:
+        with TestClient(agent_app) as client:
+            response = client.get("/healthz")
+    finally:
+        os.chmod(runtime_code_dir, 0o755)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["details"]["workspace_writable"] is True
+    assert body["details"]["runtime_code_writable"] is False
 
 
 def test_scripted_planner_completes_local_task_end_to_end(tmp_path):
@@ -442,3 +521,67 @@ def test_scripted_planner_can_render_browser_via_bridge_and_write_artifacts(tmp_
     assert "Fixture Browser Title" in payload
     assert "browser-req-1" in payload
     assert "Rendered browser text preview" in payload
+
+
+def test_scripted_planner_can_follow_browser_href_via_bridge_and_write_artifacts(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    bridge = FakeBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_browser_render", params={"url": "https://example.com/source"}),
+            PlanAction(
+                kind="bridge_browser_follow_href",
+                params={
+                    "source_url": "https://example.com/source",
+                    "target_url": "{last_browser_first_followable_target_url}",
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "reports/browser_follow_report.md",
+                    "content_template": (
+                        "source={last_browser_follow_source_url}\n"
+                        "target={last_browser_follow_requested_target_url}\n"
+                        "final={last_browser_follow_final_url}\n"
+                        "title={last_browser_follow_title}\n"
+                        "request_id={last_browser_follow_request_id}\n"
+                        "trace_id={last_browser_follow_trace_id}\n"
+                        "preview={last_browser_follow_text_preview}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="write_binary_base64",
+                params={
+                    "path": "reports/browser_follow.png",
+                    "base64_template": "{last_browser_follow_screenshot_base64}",
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "browser follow complete"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=6,
+    )
+
+    result = asyncio.run(runner.run("follow one safe href"))
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    assert bridge.browser_follow_href_calls == 1
+    report = workspace_dir / "reports" / "browser_follow_report.md"
+    screenshot = workspace_dir / "reports" / "browser_follow.png"
+    assert report.exists()
+    assert screenshot.exists()
+    assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    payload = report.read_text(encoding="ascii")
+    assert "https://example.com/source" in payload
+    assert "https://example.com/follow-target" in payload
+    assert "Fixture Browser Follow Title" in payload
+    assert "browser-follow-req-1" in payload

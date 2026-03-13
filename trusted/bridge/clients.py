@@ -1,6 +1,8 @@
 import httpx
 
 from shared.schemas import (
+    BrowserFollowHrefInternalResponse,
+    BrowserFollowHrefRequest,
     BrowserRenderInternalResponse,
     BrowserRenderRequest,
     ChatCompletionRequest,
@@ -68,6 +70,15 @@ class TrustedBridgeClients:
             response = await client.post("/internal/render", json=payload.model_dump())
             response.raise_for_status()
         return BrowserRenderInternalResponse.model_validate(response.json())
+
+    async def browser_follow_href(
+        self,
+        payload: BrowserFollowHrefRequest,
+    ) -> BrowserFollowHrefInternalResponse:
+        async with httpx.AsyncClient(base_url=self.browser_url, timeout=25.0) as client:
+            response = await client.post("/internal/follow-href", json=payload.model_dump())
+            response.raise_for_status()
+        return BrowserFollowHrefInternalResponse.model_validate(response.json())
 
     async def run_agent_probe(self, probe_kind: str) -> EgressProbeResult:
         if probe_kind == "public":

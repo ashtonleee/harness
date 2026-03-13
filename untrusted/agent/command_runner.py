@@ -48,7 +48,10 @@ class BoundedCommandRunner:
     def _env(self) -> dict[str, str]:
         return {
             "PATH": os.environ.get("PATH", ""),
+            "HOME": "/tmp",
+            "TMPDIR": "/tmp",
             "PYTHONUNBUFFERED": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
         }
 
     def run(

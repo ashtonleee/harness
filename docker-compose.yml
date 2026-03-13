@@ -122,6 +122,12 @@ services:
       RSI_BROWSER_SETTLE_TIME_MS: ${RSI_BROWSER_SETTLE_TIME_MS:-500}
       RSI_BROWSER_MAX_RENDERED_TEXT_BYTES: ${RSI_BROWSER_MAX_RENDERED_TEXT_BYTES:-16384}
       RSI_BROWSER_MAX_SCREENSHOT_BYTES: ${RSI_BROWSER_MAX_SCREENSHOT_BYTES:-1048576}
+      HOME: /home/browseruser
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./trusted/browser/chromium-seccomp.json
+    tmpfs:
+      - /tmp
     depends_on:
       webfixture:
         condition: service_healthy
@@ -153,8 +159,13 @@ services:
       RSI_BRIDGE_URL: http://bridge:8000
       RSI_AGENT_WORKSPACE_DIR: /workspace/agent
       RSI_AGENT_RUNTIME_CODE_DIR: /app/untrusted
+      HOME: /tmp
+      TMPDIR: /tmp
     volumes:
       - ./untrusted/agent_workspace:/workspace/agent
+    read_only: true
+    tmpfs:
+      - /tmp
     depends_on:
       bridge:
         condition: service_healthy
@@ -196,6 +207,7 @@ services:
       egress_net:
         aliases:
           - allowed.test
+          - allowed-two.test
           - blocked.test
 
 networks:
