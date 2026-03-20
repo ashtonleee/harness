@@ -44,6 +44,7 @@ def docker_env() -> dict[str, str]:
     env["RSI_LLM_BUDGET_TOKEN_CAP"] = "200"
     env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test,allowed-two.test"
     env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test,allowed-two.test"
+    env["RSI_ACTION_ALLOWLIST_HOSTS"] = "allowed.test"
     return env
 
 
@@ -133,6 +134,30 @@ def parse_report_fields(text: str) -> dict[str, str]:
         key, value = line.split("=", 1)
         fields[key] = value
     return fields
+
+
+def find_interactable(
+    snapshot: dict,
+    *,
+    kind: str | None = None,
+    name: str | None = None,
+    label: str | None = None,
+    text: str | None = None,
+) -> dict:
+    for item in snapshot["interactable_elements"]:
+        if kind and item.get("kind") != kind:
+            continue
+        if name and item.get("name") != name:
+            continue
+        if label and item.get("label") != label:
+            continue
+        if text and item.get("text") != text:
+            continue
+        return item
+    raise AssertionError(
+        f"missing interactable kind={kind!r} name={name!r} label={label!r} text={text!r}: "
+        f"{snapshot['interactable_elements']!r}"
+    )
 
 
 def expect_failure_via_agent(target_url: str, env: dict[str, str]):
@@ -461,6 +486,237 @@ def test_browser_follow_href_fails_closed_and_status_exposes_follow_state(compos
         headers=agent_auth_headers(),
     )
     assert probe_response["status_code"] == 404
+
+
+def test_interactive_browser_session_lifecycle_supports_click_fill_and_gated_submit(compose_stack):
+    help_open = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/sessions/open",
+        env=compose_stack,
+        payload={"url": "http://allowed.test/browser/interactive-form"},
+        headers=agent_auth_headers(),
+    )
+    assert help_open["status_code"] == 200
+    help_snapshot = help_open["json"]
+    assert help_snapshot["page_title"] == "Interactive form fixture"
+    assert help_snapshot["current_url"] == "http://allowed.test/browser/interactive-form"
+
+    help_link = find_interactable(help_snapshot, kind="link", text="Read more")
+    help_click = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{help_snapshot['session_id']}/click",
+        env=compose_stack,
+        payload={
+            "snapshot_id": help_snapshot["snapshot_id"],
+            "element_id": help_link["element_id"],
+        },
+        headers=agent_auth_headers(),
+    )
+    assert help_click["status_code"] == 200
+    assert help_click["json"]["current_url"] == "http://allowed.test/browser/interactive-help"
+    assert help_click["json"]["page_title"] == "Interactive help fixture"
+
+    opened = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/sessions/open",
+        env=compose_stack,
+        payload={"url": "http://allowed.test/browser/interactive-form"},
+        headers=agent_auth_headers(),
+    )
+    assert opened["status_code"] == 200
+    snapshot = opened["json"]
+    session_id = snapshot["session_id"]
+    first_snapshot_id = snapshot["snapshot_id"]
+
+    submit = find_interactable(snapshot, kind="submit", text="Claim reward")
+    direct_submit_click = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/click",
+        env=compose_stack,
+        payload={
+            "snapshot_id": first_snapshot_id,
+            "element_id": submit["element_id"],
+        },
+        headers=agent_auth_headers(),
+    )
+    assert direct_submit_click["status_code"] == 409
+    assert direct_submit_click["json"]["reason"] == "browser_submit_requires_proposal"
+
+    name_field = find_interactable(snapshot, kind="text_input", name="name")
+    typed = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/type",
+        env=compose_stack,
+        payload={
+            "snapshot_id": first_snapshot_id,
+            "element_id": name_field["element_id"],
+            "text": "alice",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert typed["status_code"] == 200
+    typed_snapshot = typed["json"]
+    assert find_interactable(typed_snapshot, kind="text_input", name="name")["value_preview"] == "alice"
+
+    stale_select = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/select",
+        env=compose_stack,
+        payload={
+            "snapshot_id": first_snapshot_id,
+            "element_id": find_interactable(snapshot, kind="select", name="plan")["element_id"],
+            "value": "pro",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert stale_select["status_code"] == 409
+    assert stale_select["json"]["reason"] == "browser_snapshot_stale"
+
+    select = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/select",
+        env=compose_stack,
+        payload={
+            "snapshot_id": typed_snapshot["snapshot_id"],
+            "element_id": find_interactable(typed_snapshot, kind="select", name="plan")["element_id"],
+            "value": "pro",
+        },
+        headers=agent_auth_headers(),
+    )
+    assert select["status_code"] == 200
+    selected_snapshot = select["json"]
+    assert find_interactable(selected_snapshot, kind="select", name="plan")["value_preview"] == "pro"
+
+    checked = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/set_checked",
+        env=compose_stack,
+        payload={
+            "snapshot_id": selected_snapshot["snapshot_id"],
+            "element_id": find_interactable(selected_snapshot, kind="checkbox", name="agree")["element_id"],
+            "checked": True,
+        },
+        headers=agent_auth_headers(),
+    )
+    assert checked["status_code"] == 200
+    checked_snapshot = checked["json"]
+    assert find_interactable(checked_snapshot, kind="checkbox", name="agree")["checked"] is True
+
+    proposal = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{session_id}/submit_proposal",
+        env=compose_stack,
+        payload={
+            "snapshot_id": checked_snapshot["snapshot_id"],
+            "element_id": find_interactable(checked_snapshot, kind="submit", text="Claim reward")["element_id"],
+        },
+        headers=agent_auth_headers(),
+    )
+    assert proposal["status_code"] == 200
+    proposal_body = proposal["json"]
+    assert proposal_body["action_type"] == "browser_submit"
+    assert proposal_body["status"] == "pending"
+    assert proposal_body["action_payload"]["target_url"] == "http://allowed.test/browser/interactive-result"
+    assert proposal_body["action_payload"]["method"] == "POST"
+    assert proposal_body["action_payload"]["field_preview"] == [
+        {"name": "name", "kind": "text", "value_preview": "alice"},
+        {"name": "plan", "kind": "select", "value_preview": "pro"},
+        {"name": "agree", "kind": "checkbox", "value_preview": "yes"},
+    ]
+    proposal_id = proposal_body["proposal_id"]
+
+    decide = compose_http_response(
+        "bridge",
+        "POST",
+        f"http://127.0.0.1:8000/proposals/{proposal_id}/decide",
+        env=compose_stack,
+        payload={"decision": "approve", "reason": "interactive browser lifecycle test"},
+        headers=operator_auth_headers(),
+    )
+    assert decide["status_code"] == 200
+    assert decide["json"]["status"] == "approved"
+
+    execute = compose_http_response(
+        "bridge",
+        "POST",
+        f"http://127.0.0.1:8000/proposals/{proposal_id}/execute",
+        env=compose_stack,
+        headers=operator_auth_headers(),
+    )
+    assert execute["status_code"] == 200
+    execute_body = execute["json"]
+    assert execute_body["status"] == "executed"
+    result = execute_body["execution_result"]
+    assert result["target_url"] == "http://allowed.test/browser/interactive-result"
+    assert result["method"] == "POST"
+    assert result["http_status"] == 200
+    assert result["page_title"] == "Interactive result fixture"
+    assert result["current_url"] == "http://allowed.test/browser/interactive-result"
+    assert result["field_preview"] == [
+        {"name": "name", "kind": "text", "value_preview": "alice"},
+        {"name": "plan", "kind": "select", "value_preview": "pro"},
+        {"name": "agree", "kind": "checkbox", "value_preview": "yes"},
+    ]
+    assert result["session_id"] == session_id
+    assert result["snapshot_id"]
+
+    post_submit_snapshot = compose_http_response(
+        "agent",
+        "GET",
+        f"http://bridge:8000/web/browser/sessions/{session_id}",
+        env=compose_stack,
+        headers=agent_auth_headers(),
+    )
+    assert post_submit_snapshot["status_code"] == 200
+    assert post_submit_snapshot["json"]["current_url"] == "http://allowed.test/browser/interactive-result"
+    assert "Submitted name=alice plan=pro agree=yes." in post_submit_snapshot["json"]["rendered_text"]
+
+    events = load_events()
+    event_types = [event["event_type"] for event in events]
+    assert "browser_session_open" in event_types
+    assert "browser_session_click" in event_types
+    assert "browser_session_type" in event_types
+    assert "browser_session_select" in event_types
+    assert "browser_session_set_checked" in event_types
+    assert "browser_submit_proposal_created" in event_types
+    assert "proposal_executed" in event_types
+
+
+def test_browser_submit_preview_blocks_targets_outside_action_allowlist(compose_stack):
+    opened = compose_http_response(
+        "agent",
+        "POST",
+        "http://bridge:8000/web/browser/sessions/open",
+        env=compose_stack,
+        payload={"url": "http://allowed.test/browser/interactive-form-disallowed"},
+        headers=agent_auth_headers(),
+    )
+    assert opened["status_code"] == 200
+    snapshot = opened["json"]
+
+    proposal = compose_http_response(
+        "agent",
+        "POST",
+        f"http://bridge:8000/web/browser/sessions/{snapshot['session_id']}/submit_proposal",
+        env=compose_stack,
+        payload={
+            "snapshot_id": snapshot["snapshot_id"],
+            "element_id": find_interactable(snapshot, kind="submit", text="Try blocked submit")["element_id"],
+        },
+        headers=agent_auth_headers(),
+    )
+    assert proposal["status_code"] == 403
+    assert proposal["json"]["reason"] == "host_not_in_action_allowlist"
+    assert proposal["json"]["host"] == "allowed-two.test"
 
 
 def test_seed_runner_browser_demo_writes_artifacts_and_recovery_resets_them(compose_stack):

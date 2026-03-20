@@ -177,6 +177,33 @@ class FakeSessionManager:
                     "relative_path": "sessions/session-1/artifacts/turn_001_browser.png",
                     "url": "/artifacts/sessions/session-1/artifacts/turn_001_browser.png",
                 },
+                "browser_session": {
+                    "session_id": "browser-session-1",
+                    "snapshot_id": "snapshot-2",
+                    "current_url": "http://allowed.test/browser/interactive-form",
+                    "page_title": "Interactive form fixture",
+                    "interactable_elements": [
+                        {
+                            "element_id": "el_001",
+                            "kind": "text_input",
+                            "label": "Name",
+                            "name": "name",
+                            "value_preview": "alice",
+                        },
+                        {
+                            "element_id": "el_002",
+                            "kind": "submit",
+                            "text": "Claim reward",
+                        },
+                    ],
+                },
+                "workspace_state": {
+                    "last_proposal": {
+                        "proposal_id": "pending-1",
+                        "action_type": "http_post",
+                        "action_payload": {"url": "https://httpbin.org/post"},
+                    }
+                },
                 "recent_screenshots": [
                     {
                         "name": "turn_001_browser.png",
@@ -230,6 +257,8 @@ class FakeSessionManager:
             "diagnostics": [],
             "transcript": [],
             "current_screenshot": None,
+            "browser_session": {},
+            "workspace_state": {"last_proposal": None},
             "recent_screenshots": [],
             "related_artifacts": [],
             "summary_url": "",
@@ -268,12 +297,12 @@ def make_settings(tmp_path: Path) -> ConsoleSettings:
     )
 
 
-def make_proposals() -> list[ProposalRecord]:
+def make_proposals(*, action_type: str = "http_post", action_payload: dict | None = None) -> list[ProposalRecord]:
     return [
         ProposalRecord(
             proposal_id="pending-1",
-            action_type="http_post",
-            action_payload={"url": "https://httpbin.org/post"},
+            action_type=action_type,
+            action_payload=action_payload or {"url": "https://httpbin.org/post"},
             status="pending",
             created_by="agent",
             created_at="2026-03-20T00:01:00+00:00",
@@ -348,6 +377,55 @@ def test_session_detail_and_stream_render_transcript_and_preview(tmp_path: Path)
     assert api_response.json()["session"]["session_id"] == "session-1"
     assert api_response.json()["phase_label"] == "waiting_for_approval"
     assert "event: snapshot" in "\n".join(chunks)
+
+
+@pytest.mark.fast
+def test_session_detail_renders_browser_submit_preview_and_interactables(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    session_manager = FakeSessionManager(settings)
+    session_manager.snapshots["session-1"]["workspace_state"] = {
+        "last_proposal": {
+            "proposal_id": "pending-1",
+            "action_type": "browser_submit",
+            "action_payload": {
+                "target_url": "http://allowed.test/browser/interactive-result",
+                "method": "POST",
+                "field_preview": [
+                    {"name": "name", "kind": "text", "value_preview": "alice"},
+                    {"name": "plan", "kind": "select", "value_preview": "pro"},
+                ],
+            },
+        }
+    }
+    bridge = FakeBridgeAPI(
+        proposals=make_proposals(
+            action_type="browser_submit",
+            action_payload={
+                "target_url": "http://allowed.test/browser/interactive-result",
+                "method": "POST",
+                "field_preview": [
+                    {"name": "name", "kind": "text", "value_preview": "alice"},
+                    {"name": "plan", "kind": "select", "value_preview": "pro"},
+                ],
+            },
+        )
+    )
+    app = create_app(
+        settings=settings,
+        bridge_api=bridge,
+        repo_data=RepoData(settings),
+        session_manager=session_manager,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/sessions/session-1")
+
+    assert response.status_code == 200
+    assert "Interactive Browser" in response.text
+    assert "browser-session-1" in response.text
+    assert "Claim reward" in response.text
+    assert "interactive-result" in response.text
+    assert "Field preview" in response.text
 
 
 @pytest.mark.fast

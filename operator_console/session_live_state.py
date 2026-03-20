@@ -19,6 +19,7 @@ def build_session_snapshot(
     bridge_error: str = "",
 ) -> dict:
     session = dict(raw_snapshot.get("session", {}))
+    browser_session = dict(raw_snapshot.get("browser_session", {}))
     transcript = [
         _display_transcript_item(item)
         for item in raw_snapshot.get("transcript", [])
@@ -30,7 +31,7 @@ def build_session_snapshot(
         allowlist_hosts=allowlist_hosts or raw_snapshot.get("allowlist_hosts", []) or [],
         bridge_error=bridge_error or raw_snapshot.get("bridge_error", ""),
     )
-    phase_label, phase_tone, headline, next_action = _phase_summary(session, transcript)
+    phase_label, phase_tone, headline, next_action = _phase_summary(session, transcript, browser_session)
     screenshots = [
         item
         for item in raw_snapshot.get("recent_screenshots", [])
@@ -44,6 +45,9 @@ def build_session_snapshot(
             str(session.get("status", "")),
             str(session.get("updated_at", "")),
             str(raw_snapshot.get("summary_url", "")),
+            str(browser_session.get("session_id", "")),
+            str(browser_session.get("snapshot_id", "")),
+            str(browser_session.get("current_url", "")),
             str((current_screenshot or {}).get("relative_path", "")),
             str(len(transcript)),
             str(raw_snapshot.get("log_tail", "")),
@@ -51,6 +55,7 @@ def build_session_snapshot(
     )
     return {
         **raw_snapshot,
+        "browser_session": browser_session,
         "transcript": transcript,
         "recent_screenshots": screenshots,
         "current_screenshot": current_screenshot,
@@ -80,6 +85,21 @@ def _display_transcript_item(item: dict) -> dict:
             summary = f"Opened {result.get('final_url') or result.get('normalized_url') or 'a page'}."
         elif tool == "bridge_browser_follow_href":
             summary = f"Followed to {result.get('final_url') or result.get('requested_target_url') or 'a page'}."
+        elif tool == "bridge_browser_session_open":
+            summary = f"Opened interactive browser session on {result.get('current_url') or 'a page'}."
+        elif tool == "bridge_browser_session_snapshot":
+            summary = f"Refreshed the interactive browser snapshot for {result.get('current_url') or 'the current page'}."
+        elif tool == "bridge_browser_session_click":
+            summary = f"Clicked an interactive element and now sees {result.get('current_url') or 'the updated page'}."
+        elif tool == "bridge_browser_session_type":
+            summary = "Typed into a form field."
+        elif tool == "bridge_browser_session_select":
+            summary = "Updated a select field."
+        elif tool == "bridge_browser_session_set_checked":
+            summary = "Updated a checkbox or radio field."
+        elif tool == "bridge_browser_submit_proposal":
+            summary = f"Created browser submit proposal {result.get('proposal_id', '')} and paused for approval."
+            tone = "warn"
         elif tool == "bridge_create_proposal":
             summary = f"Created proposal {result.get('proposal_id', '')} and paused for approval."
             tone = "warn"
@@ -105,7 +125,7 @@ def _display_transcript_item(item: dict) -> dict:
     }
 
 
-def _phase_summary(session: dict, transcript: list[dict]) -> tuple[str, str, str, str]:
+def _phase_summary(session: dict, transcript: list[dict], browser_session: dict) -> tuple[str, str, str, str]:
     status = str(session.get("status", ""))
     proposal = session.get("last_proposal", {})
     proposal_status = proposal.get("status") if isinstance(proposal, dict) else ""
@@ -117,6 +137,13 @@ def _phase_summary(session: dict, transcript: list[dict]) -> tuple[str, str, str
             "Read the diagnostics and log tail, then decide whether to retry.",
         )
     if proposal_status == "executed":
+        if (proposal.get("action_type") if isinstance(proposal, dict) else "") == "browser_submit":
+            return (
+                "running",
+                "ok",
+                "The approved browser submit executed and the session is continuing on the resulting page.",
+                "Watch the live page packet and transcript for the next answer step.",
+            )
         return (
             "running",
             "ok",
@@ -131,6 +158,13 @@ def _phase_summary(session: dict, transcript: list[dict]) -> tuple[str, str, str
             "Execute the approved proposal to let the session continue.",
         )
     if proposal_status == "pending" or status == "waiting_for_approval":
+        if (proposal.get("action_type") if isinstance(proposal, dict) else "") == "browser_submit":
+            return (
+                "waiting_for_approval",
+                "warn",
+                "The session prepared a real form submit and is paused for operator approval.",
+                "Review the target and field preview, then approve or reject the submit.",
+            )
         return (
             "waiting_for_approval",
             "warn",
@@ -151,12 +185,31 @@ def _phase_summary(session: dict, transcript: list[dict]) -> tuple[str, str, str
             "The operator console is relaunching the next session turn.",
             "Wait for the transcript to resume and the next browser packet to arrive.",
         )
-    if any(item.get("tool") in {"bridge_browser_render", "bridge_browser_follow_href"} for item in transcript[-3:]):
+    if any(
+        item.get("tool") in {
+            "bridge_browser_render",
+            "bridge_browser_follow_href",
+            "bridge_browser_session_open",
+            "bridge_browser_session_snapshot",
+            "bridge_browser_session_click",
+            "bridge_browser_session_type",
+            "bridge_browser_session_select",
+            "bridge_browser_session_set_checked",
+        }
+        for item in transcript[-4:]
+    ):
         return (
             "running",
             "ok",
-            "The session is reading a page through the packet browser.",
-            "Watch the preview and transcript for the next step.",
+            "The session is actively working inside the interactive browser packet.",
+            "Watch the preview, interactables, and transcript for the next step.",
+        )
+    if browser_session.get("session_id"):
+        return (
+            "running",
+            "ok",
+            "The session has an active trusted browser session open.",
+            "Watch for the next interactive browser action or approval gate.",
         )
     return (
         "running" if status in {"starting", "running"} else status or "starting",
@@ -207,6 +260,16 @@ def _build_diagnostics(*, session: dict, transcript: list[dict], allowlist_hosts
     proposal = session.get("last_proposal", {})
     if isinstance(proposal, dict):
         if proposal.get("status") == "pending":
+            if proposal.get("action_type") == "browser_submit":
+                target_url = ((proposal.get("action_payload") or {}).get("target_url", "") if isinstance(proposal.get("action_payload"), dict) else "")
+                diagnostics.append(
+                    SessionDiagnostic(
+                        severity="warn",
+                        title="Waiting for browser submit approval",
+                        body=f"The session prepared a submit to {target_url or 'the current form target'} and is paused for operator approval.",
+                    )
+                )
+                return diagnostics
             diagnostics.append(
                 SessionDiagnostic(
                     severity="warn",

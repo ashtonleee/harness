@@ -5,7 +5,9 @@ import pytest
 
 from shared.schemas import (
     AgentRunEventReceipt,
+    BrowserInteractable,
     BrowserRenderResponse,
+    BrowserSessionSnapshotResponse,
     BrowserState,
     BridgeStatusReport,
     BudgetState,
@@ -27,6 +29,7 @@ class FakeBridgeClient:
         self.chat_messages = list(chat_messages)
         self.reported_events: list[dict] = []
         self.created_proposals: list[dict] = []
+        self.browser_session_snapshots: dict[str, BrowserSessionSnapshotResponse] = {}
 
     async def status(self) -> BridgeStatusReport:
         connection = ConnectionStatus(
@@ -144,6 +147,125 @@ class FakeBridgeClient:
             trace_id="trace-proposal",
         )
 
+    async def browser_session_open(self, *, url: str) -> BrowserSessionSnapshotResponse:
+        snapshot = BrowserSessionSnapshotResponse(
+            request_id="browser-session-open",
+            trace_id="trace-browser-session-open",
+            session_id="browser-session-1",
+            snapshot_id="snapshot-1",
+            current_url=url,
+            http_status=200,
+            page_title="Interactive form fixture",
+            meta_description="",
+            rendered_text="Interactive form fixture",
+            rendered_text_sha256="session-sha-1",
+            text_bytes=24,
+            text_truncated=False,
+            screenshot_png_base64="iVBORw0KGgo=",
+            screenshot_sha256="session-shot-1",
+            screenshot_bytes=8,
+            observed_hosts=["httpbin.org"],
+            resolved_ips=["127.0.0.1"],
+            channel_records=[],
+            interactable_elements=[
+                BrowserInteractable(
+                    element_id="el_001",
+                    kind="text_input",
+                    label="Name",
+                    name="name",
+                    value_preview="",
+                ),
+                BrowserInteractable(
+                    element_id="el_002",
+                    kind="submit",
+                    text="Claim reward",
+                ),
+            ],
+        )
+        self.browser_session_snapshots[snapshot.session_id] = snapshot
+        return snapshot
+
+    async def browser_session_snapshot(self, *, session_id: str) -> BrowserSessionSnapshotResponse:
+        return self.browser_session_snapshots[session_id]
+
+    async def browser_session_click(self, *, session_id: str, snapshot_id: str, element_id: str) -> BrowserSessionSnapshotResponse:
+        return self.browser_session_snapshots[session_id]
+
+    async def browser_session_type(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        text: str,
+    ) -> BrowserSessionSnapshotResponse:
+        snapshot = self.browser_session_snapshots[session_id].model_copy(
+            update={
+                "snapshot_id": "snapshot-2",
+                "interactable_elements": [
+                    BrowserInteractable(
+                        element_id="el_001",
+                        kind="text_input",
+                        label="Name",
+                        name="name",
+                        value_preview=text,
+                    ),
+                    BrowserInteractable(
+                        element_id="el_002",
+                        kind="submit",
+                        text="Claim reward",
+                    ),
+                ],
+            }
+        )
+        self.browser_session_snapshots[session_id] = snapshot
+        return snapshot
+
+    async def browser_session_select(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        value: str,
+    ) -> BrowserSessionSnapshotResponse:
+        return self.browser_session_snapshots[session_id]
+
+    async def browser_session_set_checked(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        checked: bool,
+    ) -> BrowserSessionSnapshotResponse:
+        return self.browser_session_snapshots[session_id]
+
+    async def browser_submit_proposal(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> ProposalRecord:
+        return ProposalRecord(
+            proposal_id="browser-proposal-1",
+            action_type="browser_submit",
+            action_payload={
+                "session_id": session_id,
+                "snapshot_id": snapshot_id,
+                "submit_element_id": element_id,
+                "target_url": "https://httpbin.org/post",
+                "method": "POST",
+                "field_preview": [{"name": "name", "kind": "text", "value_preview": "demo"}],
+            },
+            status="pending",
+            created_by="agent",
+            created_at="2026-03-20T00:00:01+00:00",
+            request_id="req-browser-proposal",
+            trace_id="trace-browser-proposal",
+        )
+
     async def report_agent_event(
         self,
         *,
@@ -199,6 +321,15 @@ def test_validate_session_action_accepts_allowed_tools_and_rejects_run_command()
                 "tool": "run_command",
                 "params": {"argv": ["python", "-m", "pytest"]},
                 "reason": "Should be blocked.",
+            }
+        )
+
+    with pytest.raises(ValueError):
+        validate_session_action(
+            {
+                "tool": "bridge_browser_session_click",
+                "params": {"session_id": "browser-session-1"},
+                "reason": "Missing snapshot and element IDs.",
             }
         )
 
@@ -351,3 +482,56 @@ async def test_session_runner_writes_packet_screenshot_artifact(tmp_path: Path):
     assert result.stop_reason == "finished"
     assert screenshot_path.exists()
     assert screenshot_path.read_bytes().startswith(b"\x89PNG")
+
+
+@pytest.mark.fast
+@pytest.mark.anyio("asyncio")
+async def test_session_runner_can_open_type_and_pause_for_browser_submit(tmp_path: Path):
+    bridge = FakeBridgeClient(
+        [
+            json.dumps(
+                {
+                    "tool": "bridge_browser_session_open",
+                    "reason": "Need an interactive browser session for the form.",
+                    "params": {"url": "https://httpbin.org/forms/post"},
+                }
+            ),
+            json.dumps(
+                {
+                    "tool": "bridge_browser_session_type",
+                    "reason": "Fill the name field before submitting.",
+                    "params": {
+                        "session_id": "browser-session-1",
+                        "snapshot_id": "snapshot-1",
+                        "element_id": "el_001",
+                        "text": "alice",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "tool": "bridge_browser_submit_proposal",
+                    "reason": "Need approval before submitting the form.",
+                    "params": {
+                        "session_id": "browser-session-1",
+                        "snapshot_id": "snapshot-2",
+                        "element_id": "el_002",
+                    },
+                }
+            ),
+        ]
+    )
+    runner = make_runner(tmp_path, bridge_client=bridge)
+
+    result = await runner.run_session(
+        session_id="interactive-session",
+        task="Fill the form and ask for approval before the submit.",
+        input_url="https://httpbin.org/forms/post",
+    )
+    state = json.loads((tmp_path / "agent_workspace" / "sessions" / "interactive-session" / "state.json").read_text(encoding="utf-8"))
+
+    assert result.stop_reason == "waiting_for_approval"
+    assert state["status"] == "waiting_for_approval"
+    assert state["browser_session"]["session_id"] == "browser-session-1"
+    assert state["last_proposal"]["action_type"] == "browser_submit"
+    assert state["last_proposal"]["action_payload"]["target_url"] == "https://httpbin.org/post"

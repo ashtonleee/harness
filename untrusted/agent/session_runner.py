@@ -18,6 +18,13 @@ ALLOWED_SESSION_TOOLS = {
     "bridge_fetch",
     "bridge_browser_render",
     "bridge_browser_follow_href",
+    "bridge_browser_session_open",
+    "bridge_browser_session_snapshot",
+    "bridge_browser_session_click",
+    "bridge_browser_session_type",
+    "bridge_browser_session_select",
+    "bridge_browser_session_set_checked",
+    "bridge_browser_submit_proposal",
     "bridge_create_proposal",
     "list_files",
     "read_file",
@@ -67,6 +74,29 @@ def validate_session_action(payload: dict[str, Any]) -> SessionToolAction:
         raise ValueError("bridge_chat requires params.message")
     if tool == "bridge_fetch" and not str(params.get("url", "")).strip():
         raise ValueError("bridge_fetch requires params.url")
+    if tool == "bridge_browser_session_open" and not str(params.get("url", "")).strip():
+        raise ValueError("bridge_browser_session_open requires params.url")
+    if tool == "bridge_browser_session_snapshot" and not str(params.get("session_id", "")).strip():
+        raise ValueError("bridge_browser_session_snapshot requires params.session_id")
+    if tool in {
+        "bridge_browser_session_click",
+        "bridge_browser_session_type",
+        "bridge_browser_session_select",
+        "bridge_browser_session_set_checked",
+        "bridge_browser_submit_proposal",
+    }:
+        if not str(params.get("session_id", "")).strip():
+            raise ValueError(f"{tool} requires params.session_id")
+        if not str(params.get("snapshot_id", "")).strip():
+            raise ValueError(f"{tool} requires params.snapshot_id")
+        if not str(params.get("element_id", "")).strip():
+            raise ValueError(f"{tool} requires params.element_id")
+    if tool == "bridge_browser_session_type" and "text" not in params:
+        raise ValueError("bridge_browser_session_type requires params.text")
+    if tool == "bridge_browser_session_select" and not str(params.get("value", "")).strip():
+        raise ValueError("bridge_browser_session_select requires params.value")
+    if tool == "bridge_browser_session_set_checked" and "checked" not in params:
+        raise ValueError("bridge_browser_session_set_checked requires params.checked")
     if tool == "bridge_create_proposal":
         if not str(params.get("action_type", "")).strip():
             raise ValueError("bridge_create_proposal requires params.action_type")
@@ -105,6 +135,30 @@ class SessionRunner(SeedRunner):
         self.model = model
         self.max_turns_per_resume = max_turns_per_resume
 
+    def _reportable_result(self, action_kind: str, result: dict[str, Any]) -> dict[str, Any]:
+        if action_kind.startswith("bridge_browser_session_"):
+            return {
+                "session_id": result.get("session_id", ""),
+                "snapshot_id": result.get("snapshot_id", ""),
+                "current_url": result.get("current_url", ""),
+                "http_status": result.get("http_status"),
+                "page_title": result.get("page_title", ""),
+                "text_bytes": result.get("text_bytes", 0),
+                "text_truncated": result.get("text_truncated", False),
+                "screenshot_sha256": result.get("screenshot_sha256", ""),
+                "screenshot_bytes": result.get("screenshot_bytes", 0),
+                "interactable_count": len(result.get("interactable_elements", [])),
+            }
+        if action_kind == "bridge_browser_submit_proposal":
+            return {
+                "proposal_id": result.get("proposal_id", ""),
+                "status": result.get("status", ""),
+                "action_type": result.get("action_type", ""),
+                "target_url": result.get("target_url", ""),
+                "method": result.get("method", ""),
+            }
+        return super()._reportable_result(action_kind, result)
+
     async def run_session(
         self,
         *,
@@ -136,6 +190,8 @@ class SessionRunner(SeedRunner):
                 "last_run_id": "",
                 "summary_path": "",
                 "last_proposal": {},
+                "browser_session": {},
+                "browser_execution_consumed": False,
                 "current_screenshot_path": "",
                 "final_answer_path": "",
                 "error": "",
@@ -214,24 +270,50 @@ class SessionRunner(SeedRunner):
                 )
                 break
             if isinstance(proposal, dict) and proposal.get("status") == "executed":
-                final_answer = self._executed_proposal_summary(proposal)
-                final_path = f"sessions/{session_id}/artifacts/final_answer.md"
-                self.workspace.write_file(final_path, final_answer + "\n")
-                state["final_answer_path"] = final_path
-                self._append_transcript(
-                    session_id,
-                    {
-                        "kind": "finish",
-                        "timestamp": _now_iso(),
-                        "run_id": run_id,
-                        "reason": "The approved action already executed, so the session can conclude.",
-                        "summary": final_answer,
-                    },
-                )
-                stop_reason = "finished"
-                finish_summary = final_answer
-                state["status"] = "finished"
-                break
+                if (
+                    proposal.get("action_type") == "browser_submit"
+                    and not bool(state.get("browser_execution_consumed"))
+                ):
+                    execution_result = proposal.get("execution_result", {})
+                    if isinstance(execution_result, dict):
+                        state["browser_session"] = {
+                            "session_id": execution_result.get("session_id", ""),
+                            "snapshot_id": execution_result.get("snapshot_id", ""),
+                            "current_url": execution_result.get("current_url", ""),
+                            "page_title": execution_result.get("page_title", ""),
+                            "http_status": execution_result.get("http_status"),
+                            "field_preview": execution_result.get("field_preview", []),
+                        }
+                    state["browser_execution_consumed"] = True
+                    self._append_transcript(
+                        session_id,
+                        {
+                            "kind": "operator_state",
+                            "timestamp": _now_iso(),
+                            "run_id": run_id,
+                            "summary": "The approved browser submit executed. Continue by inspecting the post-submit page.",
+                            "proposal": proposal,
+                        },
+                    )
+                else:
+                    final_answer = self._executed_proposal_summary(proposal)
+                    final_path = f"sessions/{session_id}/artifacts/final_answer.md"
+                    self.workspace.write_file(final_path, final_answer + "\n")
+                    state["final_answer_path"] = final_path
+                    self._append_transcript(
+                        session_id,
+                        {
+                            "kind": "finish",
+                            "timestamp": _now_iso(),
+                            "run_id": run_id,
+                            "reason": "The approved action already executed, so the session can conclude.",
+                            "summary": final_answer,
+                        },
+                    )
+                    stop_reason = "finished"
+                    finish_summary = final_answer
+                    state["status"] = "finished"
+                    break
 
             try:
                 action = await self._next_action(session_id=session_id, state=state, run_state=run_state)
@@ -350,6 +432,24 @@ class SessionRunner(SeedRunner):
                     **result,
                     "action_payload": dict(action.params.get("action_payload", {})),
                 }
+                state["browser_execution_consumed"] = False
+                stop_reason = "waiting_for_approval"
+                finish_summary = "waiting for approval"
+                state["status"] = "waiting_for_approval"
+                break
+            if action.tool == "bridge_browser_submit_proposal":
+                state["last_proposal"] = {
+                    **result,
+                    "action_payload": {
+                        "session_id": action.params.get("session_id", ""),
+                        "snapshot_id": action.params.get("snapshot_id", ""),
+                        "submit_element_id": action.params.get("element_id", ""),
+                        "target_url": result.get("target_url", ""),
+                        "method": result.get("method", ""),
+                        "field_preview": result.get("field_preview", []),
+                    },
+                }
+                state["browser_execution_consumed"] = False
                 stop_reason = "waiting_for_approval"
                 finish_summary = "waiting for approval"
                 state["status"] = "waiting_for_approval"
@@ -358,6 +458,18 @@ class SessionRunner(SeedRunner):
                 artifact_path = str(result.get("artifact_path", "")).strip()
                 if artifact_path:
                     state["current_screenshot_path"] = artifact_path
+            if action.tool.startswith("bridge_browser_session_"):
+                artifact_path = str(result.get("artifact_path", "")).strip()
+                if artifact_path:
+                    state["current_screenshot_path"] = artifact_path
+                state["browser_session"] = {
+                    "session_id": result.get("session_id", ""),
+                    "snapshot_id": result.get("snapshot_id", ""),
+                    "current_url": result.get("current_url", ""),
+                    "page_title": result.get("page_title", ""),
+                    "http_status": result.get("http_status"),
+                    "interactable_elements": result.get("interactable_elements", []),
+                }
         else:
             state["status"] = "running"
 
@@ -426,6 +538,7 @@ class SessionRunner(SeedRunner):
     def _build_llm_message(self, *, session_id: str, state: dict[str, Any], run_state: RunState) -> str:
         transcript_tail = self._read_transcript_tail(session_id, max_items=8)
         last_browser = run_state.last_browser_follow or run_state.last_browser_render or {}
+        browser_session = state.get("browser_session", {}) if isinstance(state.get("browser_session"), dict) else {}
         last_proposal = state.get("last_proposal", {})
         proposal_target_url = state.get("proposal_target_url", "")
         prompt = {
@@ -440,6 +553,15 @@ class SessionRunner(SeedRunner):
                 "text_preview": last_browser.get("text_preview", ""),
                 "followable_links": (last_browser.get("followable_links") or [])[:5],
             },
+            "browser_session_packet": {
+                "session_id": browser_session.get("session_id", ""),
+                "snapshot_id": browser_session.get("snapshot_id", ""),
+                "current_url": browser_session.get("current_url", ""),
+                "page_title": browser_session.get("page_title", ""),
+                "http_status": browser_session.get("http_status"),
+                "interactable_elements": (browser_session.get("interactable_elements") or [])[:24],
+                "field_preview": browser_session.get("field_preview", []),
+            },
             "last_proposal": last_proposal,
             "allowed_tools": sorted(ALLOWED_SESSION_TOOLS),
             "instructions": [
@@ -448,6 +570,11 @@ class SessionRunner(SeedRunner):
                 "Do not use run_command, shell, or unsupported tools.",
                 "Use finish when the session can conclude with a plain-language answer.",
                 "If a browser page should be read first, use bridge_browser_render.",
+                "If the task requires interactive browsing, use bridge_browser_session_open first, then use only the returned session_id, snapshot_id, and interactable element_id values.",
+                "Do not invent element IDs or snapshot IDs.",
+                "If a trusted browser session exists but the interactable list is empty or stale, refresh it with bridge_browser_session_snapshot.",
+                "Use bridge_browser_session_click only for links and non-submit buttons.",
+                "Use bridge_browser_submit_proposal when a submit element is ready and approval is needed before submitting the form.",
                 "If human approval is needed, use bridge_create_proposal.",
                 "When using bridge_create_proposal, always include params.action_type and params.action_payload.",
                 "For the current approval flow, action_type should be http_post.",
@@ -461,7 +588,33 @@ class SessionRunner(SeedRunner):
     def _coerce_model_payload(self, payload: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return payload
-        if str(payload.get("tool", "")).strip() != "bridge_create_proposal":
+        tool = str(payload.get("tool", "")).strip()
+        browser_session = state.get("browser_session", {})
+        if tool == "bridge_browser_session_open":
+            params = payload.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            if not str(params.get("url", "")).strip() and str(state.get("input_url", "")).strip():
+                params["url"] = state.get("input_url", "")
+            return {**payload, "params": params}
+        if tool in {
+            "bridge_browser_session_snapshot",
+            "bridge_browser_session_click",
+            "bridge_browser_session_type",
+            "bridge_browser_session_select",
+            "bridge_browser_session_set_checked",
+            "bridge_browser_submit_proposal",
+        }:
+            params = payload.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            if isinstance(browser_session, dict):
+                if not str(params.get("session_id", "")).strip():
+                    params["session_id"] = browser_session.get("session_id", "")
+                if tool != "bridge_browser_session_snapshot" and not str(params.get("snapshot_id", "")).strip():
+                    params["snapshot_id"] = browser_session.get("snapshot_id", "")
+            return {**payload, "params": params}
+        if tool != "bridge_create_proposal":
             return payload
         params = payload.get("params", {})
         if not isinstance(params, dict):
@@ -484,6 +637,8 @@ class SessionRunner(SeedRunner):
         run_state: RunState,
         step_index: int,
     ) -> dict[str, Any]:
+        if action.tool.startswith("bridge_browser_session_") or action.tool == "bridge_browser_submit_proposal":
+            return await self._execute_browser_session_action(session_id, action, step_index)
         plan_action = PlanAction(kind=action.tool, params=action.params)
         result = await self._execute_action(plan_action, run_state)
         if action.tool == "bridge_create_proposal":
@@ -508,6 +663,96 @@ class SessionRunner(SeedRunner):
                 self._write_state(session_id, state)
                 result = {**result, "artifact_path": artifact_path}
         return result
+
+    async def _execute_browser_session_action(
+        self,
+        session_id: str,
+        action: SessionToolAction,
+        step_index: int,
+    ) -> dict[str, Any]:
+        params = dict(action.params)
+        if action.tool == "bridge_browser_session_open":
+            response = await self.bridge_client.browser_session_open(url=str(params["url"]))
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_session_snapshot":
+            response = await self.bridge_client.browser_session_snapshot(
+                session_id=str(params["session_id"]),
+            )
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_session_click":
+            response = await self.bridge_client.browser_session_click(
+                session_id=str(params["session_id"]),
+                snapshot_id=str(params["snapshot_id"]),
+                element_id=str(params["element_id"]),
+            )
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_session_type":
+            response = await self.bridge_client.browser_session_type(
+                session_id=str(params["session_id"]),
+                snapshot_id=str(params["snapshot_id"]),
+                element_id=str(params["element_id"]),
+                text=str(params["text"]),
+            )
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_session_select":
+            response = await self.bridge_client.browser_session_select(
+                session_id=str(params["session_id"]),
+                snapshot_id=str(params["snapshot_id"]),
+                element_id=str(params["element_id"]),
+                value=str(params["value"]),
+            )
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_session_set_checked":
+            response = await self.bridge_client.browser_session_set_checked(
+                session_id=str(params["session_id"]),
+                snapshot_id=str(params["snapshot_id"]),
+                element_id=str(params["element_id"]),
+                checked=bool(params["checked"]),
+            )
+            return await self._session_snapshot_result(session_id, response, step_index=step_index)
+        if action.tool == "bridge_browser_submit_proposal":
+            proposal = await self.bridge_client.browser_submit_proposal(
+                session_id=str(params["session_id"]),
+                snapshot_id=str(params["snapshot_id"]),
+                element_id=str(params["element_id"]),
+            )
+            return {
+                "proposal_id": proposal.proposal_id,
+                "status": proposal.status,
+                "action_type": proposal.action_type,
+                "target_url": proposal.action_payload.get("target_url", ""),
+                "method": proposal.action_payload.get("method", ""),
+                "field_preview": proposal.action_payload.get("field_preview", []),
+            }
+        raise ValueError(f"unsupported browser session tool: {action.tool}")
+
+    async def _session_snapshot_result(
+        self,
+        session_id: str,
+        response,
+        *,
+        step_index: int,
+    ) -> dict[str, Any]:
+        artifact_path = f"sessions/{session_id}/artifacts/turn_{step_index + 1:03d}_browser.png"
+        self.workspace.write_binary_base64(artifact_path, response.screenshot_png_base64)
+        state = self._load_state(session_id) or {}
+        state["current_screenshot_path"] = artifact_path
+        self._write_state(session_id, state)
+        return {
+            "session_id": response.session_id,
+            "snapshot_id": response.snapshot_id,
+            "current_url": response.current_url,
+            "http_status": response.http_status,
+            "page_title": response.page_title,
+            "meta_description": response.meta_description,
+            "text_bytes": response.text_bytes,
+            "text_truncated": response.text_truncated,
+            "content_preview": response.rendered_text[:200],
+            "screenshot_sha256": response.screenshot_sha256,
+            "screenshot_bytes": response.screenshot_bytes,
+            "interactable_elements": [item.model_dump() for item in response.interactable_elements],
+            "artifact_path": artifact_path,
+        }
 
     def _count_transcript_steps(self, session_id: str, run_id: str) -> int:
         return sum(

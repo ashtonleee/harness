@@ -11,6 +11,13 @@ from shared.schemas import (
     AgentRunEventRequest,
     BrowserFollowHrefRequest,
     BrowserFollowHrefResponse,
+    BrowserSessionClickRequest,
+    BrowserSessionOpenRequest,
+    BrowserSessionSelectRequest,
+    BrowserSessionSetCheckedRequest,
+    BrowserSessionSnapshotResponse,
+    BrowserSessionTypeRequest,
+    BrowserSubmitProposalRequest,
     BrowserRenderRequest,
     BrowserRenderResponse,
     BridgeStatusReport,
@@ -95,6 +102,129 @@ class BridgeClient:
             )
             response.raise_for_status()
         return BrowserFollowHrefResponse.model_validate(response.json())
+
+    async def browser_session_open(self, *, url: str) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionOpenRequest(url=url)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                "/web/browser/sessions/open",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_snapshot(self, *, session_id: str) -> BrowserSessionSnapshotResponse:
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.get(
+                f"/web/browser/sessions/{session_id}",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_click(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionClickRequest(snapshot_id=snapshot_id, element_id=element_id)
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/click",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_type(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        text: str,
+    ) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionTypeRequest(
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            text=text,
+        )
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/type",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_select(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        value: str,
+    ) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionSelectRequest(
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            value=value,
+        )
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/select",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_session_set_checked(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+        checked: bool,
+    ) -> BrowserSessionSnapshotResponse:
+        payload = BrowserSessionSetCheckedRequest(
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+            checked=checked,
+        )
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/set_checked",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return BrowserSessionSnapshotResponse.model_validate(response.json())
+
+    async def browser_submit_proposal(
+        self,
+        *,
+        session_id: str,
+        snapshot_id: str,
+        element_id: str,
+    ) -> ProposalRecord:
+        payload = BrowserSubmitProposalRequest(
+            snapshot_id=snapshot_id,
+            element_id=element_id,
+        )
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=25.0) as client:
+            response = await client.post(
+                f"/web/browser/sessions/{session_id}/submit_proposal",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return ProposalRecord.model_validate(response.json())
 
     async def report_agent_event(
         self,
