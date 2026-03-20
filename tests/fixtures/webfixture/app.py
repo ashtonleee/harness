@@ -1,5 +1,6 @@
 from collections import defaultdict
 import time
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -886,10 +887,11 @@ async def browser_interactive_help():
 
 @app.post("/browser/interactive-result")
 async def browser_interactive_result(request: Request):
-    form = await request.form()
-    name = str(form.get("name", ""))
-    plan = str(form.get("plan", ""))
-    agree = str(form.get("agree", ""))
+    raw = (await request.body()).decode("utf-8", errors="ignore")
+    form = parse_qs(raw, keep_blank_values=True)
+    name = str((form.get("name") or [""])[0])
+    plan = str((form.get("plan") or [""])[0])
+    agree = str((form.get("agree") or [""])[0])
     return HTMLResponse(
         f"""
 <!doctype html>

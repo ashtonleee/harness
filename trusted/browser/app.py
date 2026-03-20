@@ -589,6 +589,7 @@ class BrowserSessionState:
     current_snapshot_id: str = ""
     current_interactables: dict[str, BrowserInteractable] = field(default_factory=dict)
     observation: BrowserSessionObservation = field(default_factory=BrowserSessionObservation)
+    pending_submit_request: dict[str, str] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -835,7 +836,15 @@ class BrowserSessionManager:
             preview = await self._submit_preview(session, payload.element_id)
             locator = self._locator_for(payload.element_id, session)
             self._reset_observation(session, base_url=session.page.url or preview.target_url)
-            await locator.click(timeout=int(self.settings.timeout_seconds * 1000))
+            session.pending_submit_request = {
+                "url": preview.target_url,
+                "method": preview.method,
+            }
+            try:
+                await locator.click(timeout=int(self.settings.timeout_seconds * 1000))
+            finally:
+                if session.pending_submit_request is not None:
+                    session.pending_submit_request = None
             snapshot = await self._finish_action_and_snapshot(session)
             return BrowserSubmitExecuteInternalResponse(
                 session_id=session_id,
@@ -1117,7 +1126,17 @@ class BrowserSessionManager:
             await route.abort("blockedbyclient")
             return
 
-        if channel not in {"top_level_navigation", "redirect"}:
+        pending_submit = session.pending_submit_request
+        if (
+            pending_submit is not None
+            and request.method.upper() == pending_submit.get("method", "").upper()
+            and normalized.normalized_url == pending_submit.get("url", "")
+            and is_top_level
+        ):
+            channel = "consequential_action"
+            session.pending_submit_request = None
+
+        if channel not in {"top_level_navigation", "redirect", "consequential_action"}:
             exc = browser_channel_violation(channel, request_url)
             observation.channel_records.append(
                 channel_record(
