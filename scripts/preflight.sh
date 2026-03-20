@@ -50,8 +50,7 @@ else
     if $PYTHON -m pytest tests/unit/ -q --tb=short 2>&1; then
         pass "All unit tests"
     else
-        # Distinguish known environment issues from real failures
-        warn "Unit test failures — check if Docker-dependent or env-specific"
+        fail "All unit tests"
     fi
 fi
 

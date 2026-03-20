@@ -81,12 +81,14 @@ class RunState:
     runtime_code_dir: Path
     input_url: str = ""
     follow_target_url: str = ""
+    proposal_target_url: str = ""
     steps: list[dict[str, Any]] = field(default_factory=list)
     last_bridge_status: dict[str, Any] | None = None
     last_bridge_chat: dict[str, Any] | None = None
     last_web_fetch: dict[str, Any] | None = None
     last_browser_render: dict[str, Any] | None = None
     last_browser_follow: dict[str, Any] | None = None
+    last_proposal: dict[str, Any] | None = None
 
     def template_context(self) -> dict[str, Any]:
         status = self.last_bridge_status or {}
@@ -103,6 +105,7 @@ class RunState:
             "runtime_code_dir": str(self.runtime_code_dir),
             "input_url": self.input_url,
             "follow_target_url": self.follow_target_url,
+            "proposal_target_url": self.proposal_target_url,
             "last_bridge_stage": status.get("stage", ""),
             "last_bridge_budget_remaining": status.get("budget_remaining", ""),
             "last_bridge_chat": chat.get("message", ""),
@@ -139,6 +142,10 @@ class RunState:
             "last_browser_follow_text_bytes": browser_follow.get("text_bytes", 0),
             "last_browser_follow_text_truncated": browser_follow.get("text_truncated", False),
             "last_browser_follow_screenshot_base64": browser_follow.get("screenshot_png_base64", ""),
+            "last_proposal_id": (self.last_proposal or {}).get("proposal_id", ""),
+            "last_proposal_status": (self.last_proposal or {}).get("status", ""),
+            "last_proposal_action_type": (self.last_proposal or {}).get("action_type", ""),
+            "last_proposal_target_url": ((self.last_proposal or {}).get("action_payload") or {}).get("url", ""),
         }
 
 
@@ -148,6 +155,7 @@ class SeedRunResult:
     task: str
     input_url: str
     follow_target_url: str
+    proposal_target_url: str
     success: bool
     finished_reason: str
     steps_executed: int
@@ -178,6 +186,18 @@ class SeedRunner:
 
     def _resolve_text(self, template: str, state: RunState) -> str:
         return template.format(**state.template_context())
+
+    def _resolve_template_value(self, value: Any, state: RunState) -> Any:
+        if isinstance(value, str):
+            return self._resolve_text(value, state)
+        if isinstance(value, list):
+            return [self._resolve_template_value(item, state) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._resolve_template_value(item, state)
+                for key, item in value.items()
+            }
+        return value
 
     async def _report(
         self,
@@ -239,6 +259,13 @@ class SeedRunner:
                 "text_truncated": result["text_truncated"],
                 "screenshot_sha256": result["screenshot_sha256"],
                 "screenshot_bytes": result["screenshot_bytes"],
+            }
+        if action_kind == "bridge_create_proposal":
+            return {
+                "proposal_id": result["proposal_id"],
+                "status": result["status"],
+                "action_type": result["action_type"],
+                "target_url": result.get("target_url", ""),
             }
         return result
 
@@ -365,6 +392,24 @@ class SeedRunner:
                 "screenshot_bytes": response.screenshot_bytes,
             }
 
+        if action.kind == "bridge_create_proposal":
+            action_type = self._resolve_text(action.params["action_type"], state)
+            action_payload = self._resolve_template_value(
+                action.params.get("action_payload", {}),
+                state,
+            )
+            proposal = await self.bridge_client.create_proposal(
+                action_type=action_type,
+                action_payload=action_payload,
+            )
+            state.last_proposal = proposal.model_dump()
+            return {
+                "proposal_id": proposal.proposal_id,
+                "status": proposal.status,
+                "action_type": proposal.action_type,
+                "target_url": proposal.action_payload.get("url", ""),
+            }
+
         if action.kind == "list_files":
             path = action.params.get("path", ".")
             files = self.workspace.list_files(path)
@@ -420,6 +465,7 @@ class SeedRunner:
         *,
         input_url: str = "",
         follow_target_url: str = "",
+        proposal_target_url: str = "",
     ) -> SeedRunResult:
         run_id = uuid4().hex
         state = RunState(
@@ -429,6 +475,7 @@ class SeedRunner:
             runtime_code_dir=self.runtime_code_dir,
             input_url=input_url,
             follow_target_url=follow_target_url,
+            proposal_target_url=proposal_target_url,
         )
         await self._report(
             run_id=run_id,
@@ -441,6 +488,7 @@ class SeedRunner:
                 "runtime_code_dir": str(self.runtime_code_dir),
                 "input_url": input_url,
                 "follow_target_url": follow_target_url,
+                "proposal_target_url": proposal_target_url,
                 "reported_origin": "untrusted_agent",
             },
         )
@@ -501,6 +549,7 @@ class SeedRunner:
             "task": task,
             "input_url": state.input_url,
             "follow_target_url": state.follow_target_url,
+            "proposal_target_url": state.proposal_target_url,
             "success": success,
             "finished_reason": finished_reason,
             "finish_summary": finish_summary,
@@ -529,6 +578,7 @@ class SeedRunner:
             task=task,
             input_url=state.input_url,
             follow_target_url=state.follow_target_url,
+            proposal_target_url=state.proposal_target_url,
             success=success,
             finished_reason=finished_reason,
             steps_executed=len(state.steps),
@@ -564,6 +614,7 @@ async def run_once(args) -> SeedRunResult:
         args.task,
         input_url=args.input_url,
         follow_target_url=args.follow_target_url,
+        proposal_target_url=args.proposal_target_url,
     )
 
 
@@ -576,6 +627,7 @@ def main():
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--input-url", default="")
     parser.add_argument("--follow-target-url", default="")
+    parser.add_argument("--proposal-target-url", default="")
 
     result = asyncio.run(run_once(parser.parse_args()))
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))

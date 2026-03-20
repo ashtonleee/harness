@@ -14,6 +14,11 @@ from shared.schemas import EgressFetchResponse, ProposalRecord
 from trusted.bridge.executor import execute_proposal
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 def _make_proposal(action_type: str, action_payload: dict | None = None) -> ProposalRecord:
     return ProposalRecord(
         proposal_id="test-proposal-id",

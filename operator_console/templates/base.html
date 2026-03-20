@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }} · RSI Operator Console</title>
+    <style>
+      :root {
+        --bg: #f2eadf;
+        --panel: rgba(255, 251, 245, 0.88);
+        --panel-strong: rgba(255, 251, 245, 0.96);
+        --ink: #1b1914;
+        --muted: #675e50;
+        --line: rgba(67, 55, 35, 0.16);
+        --accent: #0f5d4f;
+        --accent-soft: rgba(15, 93, 79, 0.12);
+        --warn: #9c4f1d;
+        --warn-soft: rgba(156, 79, 29, 0.14);
+        --bad: #8a2f2b;
+        --bad-soft: rgba(138, 47, 43, 0.14);
+        --shadow: 0 18px 48px rgba(42, 32, 18, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(15, 93, 79, 0.12), transparent 28rem),
+          radial-gradient(circle at top right, rgba(156, 79, 29, 0.14), transparent 24rem),
+          linear-gradient(180deg, #f6efe5 0%, #efe5d6 100%);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .shell {
+        width: min(1180px, calc(100vw - 2rem));
+        margin: 0 auto;
+        padding: 1.25rem 0 2rem;
+      }
+
+      .masthead {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: end;
+        margin-bottom: 1.25rem;
+      }
+
+      .masthead h1 {
+        margin: 0;
+        font-size: clamp(1.75rem, 3vw, 2.6rem);
+        line-height: 1;
+        letter-spacing: -0.04em;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      }
+
+      .masthead p {
+        margin: 0.45rem 0 0;
+        max-width: 44rem;
+        color: var(--muted);
+      }
+
+      .nav {
+        display: flex;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+      }
+
+      .nav a {
+        padding: 0.55rem 0.85rem;
+        border-radius: 999px;
+        text-decoration: none;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.55);
+      }
+
+      .nav a.active {
+        background: var(--accent);
+        color: #f7f1e8;
+        border-color: var(--accent);
+      }
+
+      .page {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 1.25rem;
+        box-shadow: var(--shadow);
+        padding: 1rem 1.1rem;
+        backdrop-filter: blur(8px);
+      }
+
+      .panel h2,
+      .panel h3 {
+        margin-top: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      }
+
+      .grid {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 0.75rem;
+      }
+
+      .stat {
+        border-radius: 1rem;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        padding: 0.8rem;
+      }
+
+      .stat .label {
+        font-size: 0.78rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      .stat .value {
+        font-size: 1.35rem;
+        margin-top: 0.35rem;
+        font-weight: 700;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 0.75rem 0.55rem;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        border-radius: 999px;
+        padding: 0.3rem 0.65rem;
+        font-size: 0.85rem;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      .pill.ok {
+        color: var(--accent);
+        background: var(--accent-soft);
+        border-color: rgba(15, 93, 79, 0.25);
+      }
+
+      .pill.bad {
+        color: var(--bad);
+        background: var(--bad-soft);
+        border-color: rgba(138, 47, 43, 0.24);
+      }
+
+      .pill.warn {
+        color: var(--warn);
+        background: var(--warn-soft);
+        border-color: rgba(156, 79, 29, 0.24);
+      }
+
+      .callout {
+        border-radius: 1rem;
+        padding: 0.9rem 1rem;
+        border: 1px solid rgba(156, 79, 29, 0.25);
+        background: var(--warn-soft);
+      }
+
+      .callout.error {
+        border-color: rgba(138, 47, 43, 0.24);
+        background: var(--bad-soft);
+      }
+
+      .meta-list {
+        display: grid;
+        gap: 0.65rem;
+      }
+
+      .meta-row {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 1rem;
+      }
+
+      .meta-row dt {
+        color: var(--muted);
+      }
+
+      .meta-row dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      code,
+      pre {
+        font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+      }
+
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: rgba(24, 20, 15, 0.06);
+        border-radius: 1rem;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        overflow-x: auto;
+      }
+
+      .artifact-list {
+        display: grid;
+        gap: 0.65rem;
+      }
+
+      .artifact-card {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.8rem 0.9rem;
+        border-radius: 1rem;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        text-decoration: none;
+      }
+
+      .artifact-card strong {
+        display: block;
+        margin-bottom: 0.25rem;
+      }
+
+      .inline-actions {
+        display: flex;
+        gap: 0.55rem;
+        flex-wrap: wrap;
+      }
+
+      .inline-actions a {
+        text-decoration: none;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 0.35rem 0;
+      }
+
+      .markdown h1,
+      .markdown h2,
+      .markdown h3,
+      .markdown h4,
+      .markdown h5,
+      .markdown h6 {
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+      }
+
+      .markdown ul {
+        padding-left: 1.2rem;
+      }
+
+      @media (max-width: 720px) {
+        .masthead {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .meta-row {
+          grid-template-columns: 1fr;
+          gap: 0.2rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <div>
+          <h1>RSI Operator Console</h1>
+          <p>Read-only host-side view over the current bridge status, recent seed runs, workspace artifacts, and proposal records.</p>
+        </div>
+        <nav class="nav">
+          <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Home</a>
+          <a href="/runs" class="{% if request.url.path.startswith('/runs') %}active{% endif %}">Runs</a>
+          <a href="/proposals" class="{% if request.url.path.startswith('/proposals') %}active{% endif %}">Proposals</a>
+        </nav>
+      </header>
+      <main class="page">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </body>
+</html>
+

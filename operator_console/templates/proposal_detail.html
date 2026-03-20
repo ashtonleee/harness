@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>Proposal Detail</h2>
+    {% if bridge_error %}
+      <div class="callout error">
+        <strong>Bridge data unavailable.</strong>
+        <div>{{ bridge_error }}</div>
+      </div>
+    {% elif proposal %}
+      <dl class="meta-list">
+        <div class="meta-row">
+          <dt>Proposal ID</dt>
+          <dd><code>{{ proposal.proposal_id }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Status</dt>
+          <dd><span class="pill">{{ proposal.status }}</span></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Action type</dt>
+          <dd>{{ proposal.action_type }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Created</dt>
+          <dd>{{ proposal.created_at or "n/a" }} by {{ proposal.created_by or "unknown" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Decision</dt>
+          <dd>
+            {% if proposal.decided_at %}
+              {{ proposal.decided_at }} by {{ proposal.decided_by or "unknown" }}
+              {% if proposal.decision_reason %}
+                <div class="muted">{{ proposal.decision_reason }}</div>
+              {% endif %}
+            {% else %}
+              <span class="muted">not decided yet</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div class="meta-row">
+          <dt>Execution</dt>
+          <dd>
+            {% if proposal.executed_at %}
+              {{ proposal.executed_at }} by {{ proposal.executed_by or "unknown" }}
+            {% else %}
+              <span class="muted">not executed yet</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div class="meta-row">
+          <dt>Request / Trace</dt>
+          <dd><code>{{ proposal.request_id }}</code> / <code>{{ proposal.trace_id }}</code></dd>
+        </div>
+      </dl>
+
+      <h3 style="margin-top: 1rem;">Action Payload</h3>
+      <pre>{{ proposal.action_payload | pretty_json }}</pre>
+
+      {% if proposal.execution_result %}
+        <h3>Execution Result</h3>
+        <pre>{{ proposal.execution_result | pretty_json }}</pre>
+      {% endif %}
+    {% else %}
+      <div class="callout error">
+        <strong>Proposal not found.</strong>
+        <div>No bridge record exists for <code>{{ proposal_id }}</code>.</div>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}
+

@@ -31,6 +31,9 @@ def docker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["COMPOSE_PROJECT_NAME"] = COMPOSE_PROJECT
     env["RSI_LLM_BUDGET_TOKEN_CAP"] = str(BUDGET_CAP)
+    env["RSI_WEB_ALLOWLIST_HOSTS"] = "allowed.test"
+    env["RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS"] = "allowed.test"
+    env["RSI_ACTION_ALLOWLIST_HOSTS"] = "allowed.test"
     return env
 
 
@@ -67,6 +70,34 @@ def compose_exec(
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     return compose_command(["exec", "-T", service, *command], env=env, check=check)
+
+
+def compose_http_response(
+    service: str,
+    method: str,
+    url: str,
+    *,
+    env: dict[str, str],
+    payload: dict | None = None,
+    headers: dict | None = None,
+) -> dict:
+    code = (
+        "import httpx, json\n"
+        f"method = {method!r}\n"
+        f"url = {url!r}\n"
+        f"payload = {json.dumps(payload)!r}\n"
+        f"headers = {json.dumps(headers or {})!r}\n"
+        "with httpx.Client(timeout=15.0) as client:\n"
+        "    response = client.request(method, url, json=json.loads(payload) if payload else None, headers=json.loads(headers))\n"
+        "body = None\n"
+        "try:\n"
+        "    body = response.json()\n"
+        "except Exception:\n"
+        "    body = {'raw': response.text}\n"
+        "print(json.dumps({'status_code': response.status_code, 'headers': dict(response.headers), 'json': body}))\n"
+    )
+    result = compose_exec(service, ["python", "-c", code], env=env)
+    return json.loads(result.stdout)
 
 
 def load_events() -> list[dict]:
@@ -182,5 +213,75 @@ def test_seed_runner_uses_workspace_mount_and_bridge_surfaces(compose_stack):
     )
     assert any(
         event["event_type"] == "llm_call" and event["actor"] == "agent"
+        for event in events
+    )
+
+
+def test_seed_runner_can_render_fixture_and_create_pending_proposal(compose_stack):
+    research_dir = WORKSPACE_ROOT / "research"
+    if research_dir.exists():
+        shutil.rmtree(research_dir)
+
+    result = compose_exec(
+        "agent",
+        [
+            "python",
+            "-m",
+            "untrusted.agent.seed_runner",
+            "--task",
+            "read one page and ask for approval to post a summary",
+            "--planner",
+            "scripted",
+            "--script",
+            ".seed_plans/stage8_real_site_approval_demo.json",
+            "--input-url",
+            "http://allowed.test/browser/rendered",
+            "--proposal-target-url",
+            "http://allowed.test/action/echo-post",
+            "--max-steps",
+            "8",
+        ],
+        env=compose_stack,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["finished_reason"] == "planner_finished"
+    assert payload["proposal_target_url"] == "http://allowed.test/action/echo-post"
+
+    brief = WORKSPACE_ROOT / "research" / "current_real_site_brief.md"
+    screenshot = WORKSPACE_ROOT / "research" / "current_real_site_screenshot.png"
+    approval = WORKSPACE_ROOT / "research" / "current_pending_approval.md"
+    assert brief.exists()
+    assert screenshot.exists()
+    assert approval.exists()
+    brief_text = brief.read_text(encoding="utf-8")
+    assert "Source URL: http://allowed.test/browser/rendered" in brief_text
+    assert "STAGE 6 FIXTURE" in brief_text
+    assert "http://allowed.test/action/echo-post" in approval.read_text(encoding="utf-8")
+
+    proposals = compose_http_response(
+        "agent",
+        "GET",
+        "http://bridge:8000/proposals?status=pending",
+        env=compose_stack,
+        headers=agent_auth_headers(),
+    )
+    assert proposals["status_code"] == 200
+    matching = [
+        proposal
+        for proposal in proposals["json"]["proposals"]
+        if proposal["action_type"] == "http_post"
+        and proposal["action_payload"]["url"] == "http://allowed.test/action/echo-post"
+    ]
+    assert matching
+    proposal = matching[-1]
+    assert proposal["created_by"] == "agent"
+    assert proposal["status"] == "pending"
+
+    events = load_events()
+    assert any(
+        event["event_type"] == "proposal_created"
+        and event["actor"] == "agent"
+        and event["summary"]["action_type"] == "http_post"
         for event in events
     )

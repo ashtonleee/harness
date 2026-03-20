@@ -22,6 +22,7 @@ from shared.schemas import (
     ChatMessage,
     ChatUsage,
     ConnectionStatus,
+    ProposalRecord,
     RecentRequest,
     RecoveryState,
     WebFetchResponse,
@@ -41,6 +42,7 @@ class FakeBridgeClient:
         self.fetch_calls = 0
         self.browser_render_calls = 0
         self.browser_follow_href_calls = 0
+        self.create_proposal_calls = 0
         self.reported_events: list[dict] = []
 
     async def status(self) -> BridgeStatusReport:
@@ -284,6 +286,24 @@ class FakeBridgeClient:
             redirect_chain=[],
             observed_hosts=["example.com"],
             resolved_ips=["93.184.216.34"],
+        )
+
+    async def create_proposal(
+        self,
+        *,
+        action_type: str,
+        action_payload: dict,
+    ) -> ProposalRecord:
+        self.create_proposal_calls += 1
+        return ProposalRecord(
+            proposal_id="proposal-req-1",
+            action_type=action_type,
+            action_payload=action_payload,
+            status="pending",
+            created_by="agent",
+            created_at="2026-03-19T00:00:00Z",
+            request_id="proposal-request-id",
+            trace_id="proposal-trace-id",
         )
 
 
@@ -584,6 +604,89 @@ def test_scripted_planner_can_render_browser_via_bridge_and_write_artifacts(tmp_
     assert "Fixture Browser Title" in payload
     assert "browser-req-1" in payload
     assert "Rendered browser text preview" in payload
+
+
+def test_scripted_planner_can_create_http_post_proposal_after_browser_research(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    make_local_task_workspace(workspace_dir)
+
+    bridge = FakeBridgeClient()
+    planner = ScriptedPlanner(
+        [
+            PlanAction(kind="bridge_browser_render", params={"url": "{input_url}"}),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_real_site_brief.md",
+                    "content_template": (
+                        "title={last_browser_title}\n"
+                        "final_url={last_browser_final_url}\n"
+                        "preview={last_browser_text_preview}\n"
+                    ),
+                },
+            ),
+            PlanAction(
+                kind="bridge_create_proposal",
+                params={
+                    "action_type": "http_post",
+                    "action_payload": {
+                        "url": "{proposal_target_url}",
+                        "body": {
+                            "source_url": "{input_url}",
+                            "title": "{last_browser_title}",
+                            "summary_preview": "{last_browser_text_preview}",
+                        },
+                        "content_type": "application/json",
+                    },
+                },
+            ),
+            PlanAction(
+                kind="write_file",
+                params={
+                    "path": "research/current_pending_approval.md",
+                    "content_template": (
+                        "proposal_id={last_proposal_id}\n"
+                        "status={last_proposal_status}\n"
+                        "target_url={last_proposal_target_url}\n"
+                    ),
+                },
+            ),
+            PlanAction(kind="finish", params={"summary": "proposal created"}),
+        ]
+    )
+    runner = SeedRunner(
+        workspace_dir=workspace_dir,
+        bridge_client=bridge,
+        planner=planner,
+        max_steps=6,
+    )
+
+    result = asyncio.run(
+        runner.run(
+            "read one page and open a proposal",
+            input_url="https://docs.python.org/3/library/pathlib.html",
+            proposal_target_url="https://httpbin.org/post",
+        )
+    )
+
+    assert result.success is True
+    assert bridge.browser_render_calls == 1
+    assert bridge.create_proposal_calls == 1
+
+    brief = workspace_dir / "research" / "current_real_site_brief.md"
+    approval = workspace_dir / "research" / "current_pending_approval.md"
+    assert brief.exists()
+    assert approval.exists()
+    assert "Fixture Browser Title" in brief.read_text(encoding="ascii")
+    approval_text = approval.read_text(encoding="ascii")
+    assert "proposal-req-1" in approval_text
+    assert "https://httpbin.org/post" in approval_text
+
+    summary = json.loads(
+        (workspace_dir / "run_outputs" / "latest_seed_run.json").read_text(encoding="ascii")
+    )
+    assert summary["proposal_target_url"] == "https://httpbin.org/post"
+    assert any(step["kind"] == "bridge_create_proposal" for step in summary["steps"])
 
 
 def test_scripted_planner_can_capture_single_url_browser_packet(tmp_path):
