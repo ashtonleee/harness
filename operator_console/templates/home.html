@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+  {% if bridge_error %}
+    <section class="panel">
+      <div class="callout error">
+        <strong>Bridge data unavailable.</strong>
+        <div>{{ bridge_error }}</div>
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="grid two">
+    <article class="panel">
+      <h2>Current State</h2>
+      {% if status %}
+        <div class="stats">
+          <div class="stat">
+            <div class="label">Stage</div>
+            <div class="value">{{ status.stage }}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Budget Remaining</div>
+            <div class="value">{{ status.budget.remaining }}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Pending Proposals</div>
+            <div class="value">{{ status.proposals.pending if status.proposals else 0 }}</div>
+          </div>
+          <div class="stat">
+            <div class="label">Recent Runs</div>
+            <div class="value">{{ run_count }}</div>
+          </div>
+        </div>
+        <div class="table-wrap" style="margin-top: 1rem;">
+          <table>
+            <thead>
+              <tr>
+                <th>Surface</th>
+                <th>URL</th>
+                <th>Reachability</th>
+                <th>Checked</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for name, connection in status.connections.items() %}
+                <tr>
+                  <td><strong>{{ name }}</strong></td>
+                  <td><code>{{ connection.url }}</code></td>
+                  <td>
+                    <span class="pill {{ connection.reachable|tone }}">
+                      {{ "reachable" if connection.reachable else "unreachable" }}
+                    </span>
+                    {% if connection.detail %}
+                      <div class="muted">{{ connection.detail }}</div>
+                    {% endif %}
+                  </td>
+                  <td>{{ connection.checked_at or "n/a" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="empty">Status data will appear here when the bridge is reachable with a valid operator token.</div>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <h2>Quick Links</h2>
+      <div class="meta-list">
+        <div class="meta-row">
+          <dt>Bridge URL</dt>
+          <dd><code>{{ bridge_url }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Workspace</dt>
+          <dd><code>{{ workspace_dir }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Trusted State</dt>
+          <dd><code>{{ trusted_state_dir }}</code></dd>
+        </div>
+      </div>
+
+      <div style="margin-top: 1rem;" class="artifact-list">
+        {% if latest_run %}
+          <a class="artifact-card" href="/runs/{{ latest_run.name }}">
+            <div>
+              <strong>Latest Run</strong>
+              <div>{{ latest_run.name }}</div>
+              <div class="muted">{{ latest_run.task }}</div>
+            </div>
+            <div>
+              <span class="pill {{ 'ok' if latest_run.success else 'warn' }}">{{ latest_run.finished_reason or "unknown" }}</span>
+            </div>
+          </a>
+        {% else %}
+          <div class="empty">No run output JSON files found under <code>run_outputs/</code>.</div>
+        {% endif %}
+
+        {% if latest_pending %}
+          <a class="artifact-card" href="/proposals/{{ latest_pending.proposal_id }}">
+            <div>
+              <strong>Latest Pending Proposal</strong>
+              <div><code>{{ latest_pending.proposal_id }}</code></div>
+              <div class="muted">{{ latest_pending.action_type }}</div>
+            </div>
+            <div>
+              <span class="pill warn">{{ latest_pending.status }}</span>
+            </div>
+          </a>
+        {% elif status and status.proposals and status.proposals.pending == 0 %}
+          <div class="empty">There are no pending proposals right now.</div>
+        {% endif %}
+      </div>
+    </article>
+  </section>
+{% endblock %}
+

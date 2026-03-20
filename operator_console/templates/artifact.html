@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>{{ artifact.name }}</h2>
+    <dl class="meta-list">
+      <div class="meta-row">
+        <dt>Path</dt>
+        <dd><code>{{ artifact.relative_path }}</code></dd>
+      </div>
+      <div class="meta-row">
+        <dt>Kind</dt>
+        <dd>{{ artifact.kind }}</dd>
+      </div>
+      <div class="meta-row">
+        <dt>Modified</dt>
+        <dd>{{ artifact.modified_at }}</dd>
+      </div>
+      <div class="meta-row">
+        <dt>Size</dt>
+        <dd>{{ artifact.size_bytes }} bytes</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="panel">
+    {% if artifact.kind == "markdown" and artifact.rendered_html %}
+      <article class="markdown">{{ artifact.rendered_html | safe }}</article>
+    {% else %}
+      <pre>{{ artifact.raw_text }}</pre>
+    {% endif %}
+  </section>
+{% endblock %}
+

@@ -18,6 +18,8 @@ from shared.schemas import (
     ChatCompletionResponse,
     ChatMessage,
     HealthReport,
+    ProposalCreateRequest,
+    ProposalRecord,
     WebFetchRequest,
     WebFetchResponse,
 )
@@ -118,6 +120,25 @@ class BridgeClient:
             )
             response.raise_for_status()
         return AgentRunEventReceipt.model_validate(response.json())
+
+    async def create_proposal(
+        self,
+        *,
+        action_type: str,
+        action_payload: dict,
+    ) -> ProposalRecord:
+        payload = ProposalCreateRequest(
+            action_type=action_type,
+            action_payload=action_payload,
+        )
+        async with httpx.AsyncClient(base_url=self.bridge_url, timeout=10.0) as client:
+            response = await client.post(
+                "/proposals",
+                json=payload.model_dump(),
+                headers=self.headers,
+            )
+            response.raise_for_status()
+        return ProposalRecord.model_validate(response.json())
 
 
 async def probe_bridge(bridge_url: str, *, agent_token: str = "") -> dict:

@@ -1,10 +1,15 @@
 # rsi-econ
 
-Stage 6B only: trusted read-only browser mediation on top of the validated Stage 1-5 boundary, canonical trusted state, recovery, and the local-only seed agent substrate.
+Current verified repo state as of 2026-03-19:
+
+- Code and tests implement Stages 0-8, including Stage 7 proposal/approval flow and Stage 8 consequential `http_post` actions.
+- `python -m pytest tests/integration -q` passed on 2026-03-19, which is the strongest current evidence for the Compose-backed boundary, recovery, fetch/browser mediation, approval flow, provider passthrough, and consequential-action paths.
+- `python -m pytest tests/unit -q` and `./scripts/preflight.sh` also pass on 2026-03-19 after the Stage 9 baseline hardening pass.
+- Some historical sections below still focus on the Stage 5/6B demo surface. If this README conflicts with `STAGE_STATUS.md`, `ACCEPTANCE_TEST_MATRIX.md`, the Stage 7/8 plans in `plans/`, or the current integration suite, trust those newer artifacts first.
 
 For a compact claim-to-evidence audit map, see `assurance/ASSURANCE_CASE.md`, `assurance/REGISTRY.yaml`, and `assurance/RUNBOOK.md`.
 
-This repo does not implement clicks, arbitrary link-following, forms, logins, cookies/sessions, downloads/uploads, approvals, consequential actions, or operator auth on the bridge yet. It now proves:
+This repo currently proves:
 
 - the untrusted agent only sits on an internal Docker network
 - the bridge is the only cross-network hop
@@ -25,6 +30,71 @@ This repo does not implement clicks, arbitrary link-following, forms, logins, co
 - the browser follow route is fixed to `source_url + target_url`, follows exactly one trusted-extracted allowlisted href, and keeps browser activity read-only and externally visible
 - `fetcher` and `browser` no longer dial external destinations directly; the trusted `egress` service remains their outbound connector on `egress_net`, while trusted LiteLLM provider passthrough has its own egress attachment
 - the trusted browser runs as a dedicated non-root user with Chromium sandboxing enabled
+- operator/agent auth is split at the bridge with server-assigned identity
+- proposal lifecycle state is durable outside the agent workspace and visible through trusted status surfaces
+- consequential `http_post` actions go only through `bridge -> egress`, require operator approval, require an explicit action allowlist, and are logged with metadata only
+
+What is still intentionally unclaimed:
+
+- clicks, forms, logins, cookies/sessions, uploads/downloads, arbitrary waits/selectors, and general interactive browsing
+- action types beyond `echo` and `http_post`
+- production-grade assurance, runtime attestation, or comprehensive adversarial hardening
+
+Highest-confidence current operator-facing demo:
+
+- run the Stage 8 real-site agent demo: browse a real allowlisted page from inside the untrusted agent container, write human-readable research artifacts, and have the agent open a pending `http_post` approval request for operator review
+
+Historical note:
+
+- The remainder of this README is still useful for manual setup and the older Stage 5/6B demos, but it is not a complete summary of the current Stage 7/8 surface.
+
+## Real-Site Approval Demo
+
+This is the most informative manual Stage 8 demo currently in the repo:
+
+- the untrusted agent renders a real external page through the trusted browser path
+- it writes a markdown research brief plus a screenshot into the mutable workspace
+- it creates a pending `http_post` proposal through the real bridge API
+- the operator can inspect, approve, and execute that proposal with the existing Stage 7/8 flow
+
+Use a real browser source and a harmless POST target:
+
+```bash
+export RSI_WEB_ALLOWLIST_HOSTS=docs.python.org,httpbin.org
+export RSI_ACTION_ALLOWLIST_HOSTS=httpbin.org
+./scripts/up.sh
+
+docker compose exec -T agent python -m untrusted.agent.seed_runner \
+  --task "Read a real page, write a brief, and ask for approval to post a summary" \
+  --planner scripted \
+  --script .seed_plans/stage8_real_site_approval_demo.json \
+  --input-url https://docs.python.org/3/library/pathlib.html \
+  --proposal-target-url https://httpbin.org/post \
+  --max-steps 8
+```
+
+Inspect the human-readable artifacts:
+
+```bash
+cat untrusted/agent_workspace/research/current_real_site_brief.md
+cat untrusted/agent_workspace/research/current_pending_approval.md
+file untrusted/agent_workspace/research/current_real_site_screenshot.png
+```
+
+Inspect the pending approval request:
+
+```bash
+export RSI_OPERATOR_TOKEN=${RSI_OPERATOR_TOKEN:-rsi-operator-token-dev-sentinel}
+./scripts/approve.sh list --status pending
+./scripts/approve.sh show <proposal_id>
+```
+
+Optional: approve and execute it:
+
+```bash
+./scripts/approve.sh approve <proposal_id> --reason "demo approved"
+./scripts/approve.sh execute <proposal_id>
+```
 
 ## Install
 

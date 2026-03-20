@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>Recent Runs</h2>
+    {% if runs %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp / File</th>
+              <th>Task</th>
+              <th>Success</th>
+              <th>Finished Reason</th>
+              <th>Steps</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+              <tr>
+                <td>
+                  <a href="/runs/{{ run.name }}"><strong>{{ run.name }}</strong></a>
+                  <div class="muted">{{ run.modified_at }}</div>
+                </td>
+                <td>{{ run.task or "n/a" }}</td>
+                <td>
+                  {% if run.success is none %}
+                    <span class="pill warn">unknown</span>
+                  {% elif run.success %}
+                    <span class="pill ok">true</span>
+                  {% else %}
+                    <span class="pill bad">false</span>
+                  {% endif %}
+                </td>
+                <td>{{ run.finished_reason or "n/a" }}</td>
+                <td>{{ run.steps_executed }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty">No run output JSON files exist yet. Run a seed plan and refresh this page.</div>
+    {% endif %}
+  </section>
+{% endblock %}
+

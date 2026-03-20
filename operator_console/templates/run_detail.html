@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="grid two">
+    <article class="panel">
+      <h2>Run Summary</h2>
+      <dl class="meta-list">
+        <div class="meta-row">
+          <dt>Run file</dt>
+          <dd><code>{{ detail.summary.relative_path }}</code></dd>
+        </div>
+        <div class="meta-row">
+          <dt>Modified</dt>
+          <dd>{{ detail.summary.modified_at }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Task</dt>
+          <dd>{{ detail.summary.task or "n/a" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Finished reason</dt>
+          <dd>{{ detail.summary.finished_reason or "n/a" }}</dd>
+        </div>
+        <div class="meta-row">
+          <dt>Success</dt>
+          <dd>
+            {% if detail.summary.success is none %}
+              <span class="pill warn">unknown</span>
+            {% elif detail.summary.success %}
+              <span class="pill ok">true</span>
+            {% else %}
+              <span class="pill bad">false</span>
+            {% endif %}
+          </dd>
+        </div>
+        <div class="meta-row">
+          <dt>Steps executed</dt>
+          <dd>{{ detail.summary.steps_executed }}</dd>
+        </div>
+      </dl>
+      <div class="inline-actions" style="margin-top: 1rem;">
+        <a class="pill" href="/artifacts/{{ detail.summary.relative_path }}">View raw JSON artifact</a>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Related Artifacts</h2>
+      {% if detail.related_artifacts %}
+        <div class="artifact-list">
+          {% for artifact in detail.related_artifacts %}
+            <a class="artifact-card" href="/artifacts/{{ artifact.relative_path }}">
+              <div>
+                <strong>{{ artifact.name }}</strong>
+                <div class="muted">{{ artifact.relative_path }}</div>
+              </div>
+              <div>
+                <span class="pill">{{ artifact.kind }}</span>
+                <div class="muted">{{ artifact.modified_at }}</div>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty">No research artifacts were found near this run.</div>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="panel">
+    <h2>Steps</h2>
+    {% if detail.steps %}
+      {% for step in detail.steps %}
+        <article class="panel" style="box-shadow: none; margin-bottom: 0.75rem;">
+          <div class="inline-actions">
+            <span class="pill">{{ step.step_index }}</span>
+            <span class="pill">{{ step.kind }}</span>
+          </div>
+          {% if step.params %}
+            <h3 style="margin-top: 1rem;">Params</h3>
+            <pre>{{ step.params | pretty_json }}</pre>
+          {% endif %}
+          {% if step.result is defined %}
+            <h3>Result</h3>
+            <pre>{{ step.result | pretty_json }}</pre>
+          {% endif %}
+        </article>
+      {% endfor %}
+    {% else %}
+      <div class="empty">This run JSON does not include any step records.</div>
+    {% endif %}
+  </section>
+{% endblock %}
+

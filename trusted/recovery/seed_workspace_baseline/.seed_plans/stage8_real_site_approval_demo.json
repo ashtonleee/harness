@@ -1,0 +1,43 @@
+[
+  {
+    "kind": "bridge_status"
+  },
+  {
+    "kind": "bridge_browser_render",
+    "url": "{input_url}"
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_real_site_brief.md",
+    "content_template": "# Real-Site Research Brief\n\nTask: {task}\nSource URL: {input_url}\nFinal URL: {last_browser_final_url}\nTitle: {last_browser_title}\nMeta description: {last_browser_meta_description}\nRequest ID: {last_browser_request_id}\nTrace ID: {last_browser_trace_id}\n\n## Text Preview\n\n{last_browser_text_preview}\n"
+  },
+  {
+    "kind": "write_binary_base64",
+    "path": "research/current_real_site_screenshot.png",
+    "base64_template": "{last_browser_screenshot_base64}"
+  },
+  {
+    "kind": "bridge_create_proposal",
+    "action_type": "http_post",
+    "action_payload": {
+      "url": "{proposal_target_url}",
+      "body": {
+        "demo": "stage8_real_site_approval",
+        "source_url": "{input_url}",
+        "final_url": "{last_browser_final_url}",
+        "title": "{last_browser_title}",
+        "summary_preview": "{last_browser_text_preview}"
+      },
+      "content_type": "application/json"
+    }
+  },
+  {
+    "kind": "write_file",
+    "path": "research/current_pending_approval.md",
+    "content_template": "# Pending Approval Request\n\nProposal ID: {last_proposal_id}\nStatus: {last_proposal_status}\nAction Type: {last_proposal_action_type}\nTarget URL: {last_proposal_target_url}\n\nThe agent created this request after browsing:\n- Source URL: {input_url}\n- Final URL: {last_browser_final_url}\n- Title: {last_browser_title}\n\n## Preview Included In The Request\n\n{last_browser_text_preview}\n"
+  },
+  {
+    "kind": "finish",
+    "summary": "real-site browse and approval demo complete"
+  }
+]

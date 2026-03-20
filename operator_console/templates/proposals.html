@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="panel">
+    <h2>Proposals</h2>
+    <div class="inline-actions" style="margin-bottom: 1rem;">
+      <a class="pill {% if not selected_status %}ok{% endif %}" href="/proposals">all</a>
+      {% for proposal_status in proposal_statuses %}
+        <a class="pill {% if selected_status == proposal_status %}ok{% endif %}" href="/proposals?status={{ proposal_status }}">{{ proposal_status }}</a>
+      {% endfor %}
+    </div>
+
+    {% if bridge_error %}
+      <div class="callout error">
+        <strong>Bridge data unavailable.</strong>
+        <div>{{ bridge_error }}</div>
+      </div>
+    {% elif proposals %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Proposal</th>
+              <th>Created</th>
+              <th>Action Type</th>
+              <th>Created By</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for proposal in proposals %}
+              <tr>
+                <td><a href="/proposals/{{ proposal.proposal_id }}"><code>{{ proposal.proposal_id }}</code></a></td>
+                <td>{{ proposal.created_at or "n/a" }}</td>
+                <td>{{ proposal.action_type }}</td>
+                <td>{{ proposal.created_by }}</td>
+                <td><span class="pill">{{ proposal.status }}</span></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty">No proposals matched this filter.</div>
+    {% endif %}
+  </section>
+{% endblock %}
+
