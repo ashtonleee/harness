@@ -592,7 +592,7 @@ def test_interactive_browser_session_lifecycle_supports_click_fill_and_gated_sub
     )
     assert select["status_code"] == 200
     selected_snapshot = select["json"]
-    assert find_interactable(selected_snapshot, kind="select", name="plan")["value_preview"] == "pro"
+    assert find_interactable(selected_snapshot, kind="select", name="plan")["value_preview"] == "Pro"
 
     checked = compose_http_response(
         "agent",
@@ -628,9 +628,9 @@ def test_interactive_browser_session_lifecycle_supports_click_fill_and_gated_sub
     assert proposal_body["action_payload"]["target_url"] == "http://allowed.test/browser/interactive-result"
     assert proposal_body["action_payload"]["method"] == "POST"
     assert proposal_body["action_payload"]["field_preview"] == [
-        {"name": "name", "kind": "text", "value_preview": "alice"},
-        {"name": "plan", "kind": "select", "value_preview": "pro"},
-        {"name": "agree", "kind": "checkbox", "value_preview": "yes"},
+        {"name": "name", "kind": "text", "value_preview": "alice", "checked": False},
+        {"name": "plan", "kind": "select", "value_preview": "Pro", "checked": False},
+        {"name": "agree", "kind": "checkbox", "value_preview": "yes", "checked": True},
     ]
     proposal_id = proposal_body["proposal_id"]
 
@@ -662,9 +662,9 @@ def test_interactive_browser_session_lifecycle_supports_click_fill_and_gated_sub
     assert result["page_title"] == "Interactive result fixture"
     assert result["current_url"] == "http://allowed.test/browser/interactive-result"
     assert result["field_preview"] == [
-        {"name": "name", "kind": "text", "value_preview": "alice"},
-        {"name": "plan", "kind": "select", "value_preview": "pro"},
-        {"name": "agree", "kind": "checkbox", "value_preview": "yes"},
+        {"name": "name", "kind": "text", "value_preview": "alice", "checked": False},
+        {"name": "plan", "kind": "select", "value_preview": "Pro", "checked": False},
+        {"name": "agree", "kind": "checkbox", "value_preview": "yes", "checked": True},
     ]
     assert result["session_id"] == session_id
     assert result["snapshot_id"]
