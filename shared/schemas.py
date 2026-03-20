@@ -346,6 +346,118 @@ class BrowserFollowHrefResponse(BrowserFollowHrefInternalResponse):
     trace_id: str
 
 
+BrowserInteractableKind = Literal[
+    "link",
+    "button",
+    "text_input",
+    "textarea",
+    "select",
+    "checkbox",
+    "radio",
+    "submit",
+]
+
+
+class BrowserInteractable(BaseModel):
+    element_id: str
+    kind: BrowserInteractableKind
+    label: str = ""
+    text: str = ""
+    name: str = ""
+    input_type: str = ""
+    placeholder: str = ""
+    href: str = ""
+    disabled: bool = False
+    checked: bool = False
+    value_preview: str = ""
+
+
+class BrowserSessionOpenRequest(BaseModel):
+    url: str
+
+
+class BrowserSessionSnapshotRequest(BaseModel):
+    session_id: str
+
+
+class BrowserSessionSnapshotInternalResponse(BaseModel):
+    session_id: str
+    snapshot_id: str
+    current_url: str
+    http_status: int | None = None
+    page_title: str = ""
+    meta_description: str = ""
+    rendered_text: str = ""
+    rendered_text_sha256: str = ""
+    text_bytes: int = 0
+    text_truncated: bool = False
+    screenshot_png_base64: str = ""
+    screenshot_sha256: str = ""
+    screenshot_bytes: int = 0
+    observed_hosts: list[str] = Field(default_factory=list)
+    resolved_ips: list[str] = Field(default_factory=list)
+    channel_records: list[BrowserChannelRecord] = Field(default_factory=list)
+    interactable_elements: list[BrowserInteractable] = Field(default_factory=list)
+
+
+class BrowserSessionSnapshotResponse(BrowserSessionSnapshotInternalResponse):
+    request_id: str
+    trace_id: str
+
+
+class BrowserSessionElementActionRequest(BaseModel):
+    snapshot_id: str
+    element_id: str
+
+
+class BrowserSessionClickRequest(BrowserSessionElementActionRequest):
+    pass
+
+
+class BrowserSessionTypeRequest(BrowserSessionElementActionRequest):
+    text: str
+
+
+class BrowserSessionSelectRequest(BrowserSessionElementActionRequest):
+    value: str
+
+
+class BrowserSessionSetCheckedRequest(BrowserSessionElementActionRequest):
+    checked: bool
+
+
+class BrowserSubmitProposalRequest(BrowserSessionElementActionRequest):
+    pass
+
+
+class BrowserSubmitFieldPreview(BaseModel):
+    name: str
+    kind: str
+    value_preview: str = ""
+    checked: bool = False
+
+
+class BrowserSubmitPreviewInternalResponse(BaseModel):
+    session_id: str
+    snapshot_id: str
+    submit_element_id: str
+    target_url: str
+    method: str
+    field_preview: list[BrowserSubmitFieldPreview] = Field(default_factory=list)
+
+
+class BrowserSubmitExecuteRequest(BrowserSessionElementActionRequest):
+    pass
+
+
+class BrowserSubmitExecuteInternalResponse(BaseModel):
+    session_id: str
+    snapshot: BrowserSessionSnapshotInternalResponse
+    target_url: str
+    method: str
+    field_preview: list[BrowserSubmitFieldPreview] = Field(default_factory=list)
+
+
 class EgressFetchRequest(BaseModel):
     url: str
     channel: str

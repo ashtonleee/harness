@@ -15,6 +15,13 @@ from shared.schemas import (
     AgentRunEventRequest,
     BrowserFollowHrefRequest,
     BrowserFollowHrefResponse,
+    BrowserSessionClickRequest,
+    BrowserSessionOpenRequest,
+    BrowserSessionSelectRequest,
+    BrowserSessionSetCheckedRequest,
+    BrowserSessionSnapshotResponse,
+    BrowserSessionTypeRequest,
+    BrowserSubmitProposalRequest,
     BrowserRenderRequest,
     BrowserRenderResponse,
     BrowserState,
@@ -71,6 +78,7 @@ def build_surfaces() -> dict[str, str]:
         "read_only_web": "trusted_fetcher_stage5_read_only_get",
         "browser": "trusted_browser_stage6a_read_only_render",
         "browser_follow_href": "trusted_browser_stage6b_safe_follow_href",
+        "browser_interactive_sessions": "trusted_browser_stage8_interactive_sessions",
         "approvals": "active_proposal_approval_flow_stage7",
         "consequential_actions": "active_consequential_actions_stage8",
     }
@@ -236,6 +244,8 @@ def browser_defaults_for(settings) -> dict:
             "max_screenshot_bytes": settings.browser_max_screenshot_bytes,
             "max_followable_links": settings.browser_max_followable_links,
             "max_follow_hops": settings.browser_max_follow_hops,
+            "session_max_concurrent": settings.browser_session_max_concurrent,
+            "session_ttl_seconds": settings.browser_session_ttl_seconds,
         },
     }
 
@@ -901,6 +911,142 @@ def browser_follow_error_summary(detail: dict) -> dict:
     }
 
 
+def browser_session_snapshot_summary(snapshot, *, reason: str | None = None) -> dict:
+    host = urlsplit(snapshot.current_url).hostname or ""
+    summary = {
+        "session_id": snapshot.session_id,
+        "snapshot_id": snapshot.snapshot_id,
+        "current_url": snapshot.current_url,
+        "host": host,
+        "http_status": snapshot.http_status,
+        "page_title": snapshot.page_title,
+        "meta_description": snapshot.meta_description,
+        "rendered_text_sha256": snapshot.rendered_text_sha256,
+        "text_bytes": snapshot.text_bytes,
+        "text_truncated": snapshot.text_truncated,
+        "screenshot_sha256": snapshot.screenshot_sha256,
+        "screenshot_bytes": snapshot.screenshot_bytes,
+        "observed_hosts": list(snapshot.observed_hosts),
+        "resolved_ips": list(snapshot.resolved_ips),
+        "channel_records": [record.model_dump() for record in snapshot.channel_records],
+        "interactable_count": len(snapshot.interactable_elements),
+        "request_forwarded": any(record.request_forwarded for record in snapshot.channel_records),
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+def browser_session_error_summary(detail: dict) -> dict:
+    current_url = detail.get("current_url", "")
+    return {
+        "session_id": detail.get("session_id", ""),
+        "snapshot_id": detail.get("snapshot_id", ""),
+        "current_url": current_url,
+        "host": urlsplit(current_url).hostname or "",
+        "reason": detail.get("reason", detail.get("detail", "browser_session_failed")),
+        "detail": detail.get("detail", ""),
+        "observed_hosts": list(detail.get("observed_hosts", [])),
+        "resolved_ips": list(detail.get("resolved_ips", [])),
+        "http_status": detail.get("http_status"),
+        "page_title": detail.get("page_title", ""),
+        "rendered_text_sha256": detail.get("rendered_text_sha256", ""),
+        "text_bytes": int(detail.get("text_bytes", 0)),
+        "text_truncated": bool(detail.get("text_truncated", False)),
+        "screenshot_sha256": detail.get("screenshot_sha256", ""),
+        "screenshot_bytes": int(detail.get("screenshot_bytes", 0)),
+        "channel_records": list(detail.get("channel_records", [])),
+        "request_forwarded": any(
+            bool(record.get("request_forwarded", False))
+            for record in detail.get("channel_records", [])
+            if isinstance(record, dict)
+        ),
+    }
+
+
+def browser_submit_preview_summary(preview, *, reason: str | None = None) -> dict:
+    summary = {
+        "session_id": preview.session_id,
+        "snapshot_id": preview.snapshot_id,
+        "submit_element_id": preview.submit_element_id,
+        "target_url": preview.target_url,
+        "host": urlsplit(preview.target_url).hostname or "",
+        "method": preview.method,
+        "field_preview": [field.model_dump() for field in preview.field_preview],
+    }
+    if reason:
+        summary["reason"] = reason
+    return summary
+
+
+async def browser_session_call(
+    *,
+    actor: str,
+    request_id: str,
+    trace_id: str,
+    success_event_type: str,
+    denied_event_type: str,
+    error_event_type: str,
+    success_summary,
+    fallback_error_summary: dict,
+    call,
+):
+    try:
+        result = await call()
+    except httpx.HTTPStatusError as exc:
+        detail = error_detail_payload(exc)
+        status_code = exc.response.status_code
+        event_type = denied_event_type if status_code in {400, 403, 404, 409, 413} else error_event_type
+        append_event(
+            event_type=event_type,
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="denied" if event_type == denied_event_type else "error",
+            summary=browser_session_error_summary(detail),
+        )
+        return None, JSONResponse(
+            status_code=status_code,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                **detail,
+            },
+        )
+    except httpx.HTTPError as exc:
+        append_event(
+            event_type=error_event_type,
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="error",
+            summary={
+                **fallback_error_summary,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        return None, JSONResponse(
+            status_code=502,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "reason": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+    append_event(
+        event_type=success_event_type,
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary=success_summary(result),
+    )
+    return result, None
+
+
 @app.post("/web/fetch", response_model=WebFetchResponse)
 async def bridge_fetch(
     payload: WebFetchRequest,
@@ -1164,6 +1310,290 @@ async def bridge_browser_follow_href(
         trace_id=trace_id,
         **follow_result.model_dump(),
     )
+
+
+@app.post("/web/browser/sessions/open", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_open(
+    payload: BrowserSessionOpenRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_open",
+        denied_event_type="browser_session_open_denied",
+        error_event_type="browser_session_open_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": "",
+            "snapshot_id": "",
+            "current_url": payload.url,
+            "host": urlsplit(payload.url).hostname or "",
+        },
+        call=lambda: app.state.clients.browser_session_open(payload),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.get("/web/browser/sessions/{session_id}", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_snapshot(
+    session_id: str,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_snapshot",
+        denied_event_type="browser_session_snapshot_denied",
+        error_event_type="browser_session_snapshot_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": "",
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_snapshot(session_id),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/click", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_click(
+    session_id: str,
+    payload: BrowserSessionClickRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_click",
+        denied_event_type="browser_session_click_denied",
+        error_event_type="browser_session_click_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_click(session_id, payload),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/type", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_type(
+    session_id: str,
+    payload: BrowserSessionTypeRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_type",
+        denied_event_type="browser_session_type_denied",
+        error_event_type="browser_session_type_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_type(session_id, payload),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/select", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_select(
+    session_id: str,
+    payload: BrowserSessionSelectRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_select",
+        denied_event_type="browser_session_select_denied",
+        error_event_type="browser_session_select_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_select(session_id, payload),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/set_checked", response_model=BrowserSessionSnapshotResponse)
+async def bridge_browser_session_set_checked(
+    session_id: str,
+    payload: BrowserSessionSetCheckedRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> BrowserSessionSnapshotResponse | JSONResponse:
+    request_id, trace_id = request_identity()
+    snapshot, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_session_set_checked",
+        denied_event_type="browser_session_set_checked_denied",
+        error_event_type="browser_session_set_checked_error",
+        success_summary=browser_session_snapshot_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_session_set_checked(session_id, payload),
+    )
+    if error is not None:
+        return error
+    response.headers.update(make_headers(request_id, trace_id))
+    return BrowserSessionSnapshotResponse(
+        request_id=request_id,
+        trace_id=trace_id,
+        **snapshot.model_dump(),
+    )
+
+
+@app.post("/web/browser/sessions/{session_id}/submit_proposal", response_model=ProposalRecord)
+async def bridge_browser_submit_proposal(
+    session_id: str,
+    payload: BrowserSubmitProposalRequest,
+    response: Response,
+    actor: str = Depends(authenticated_actor),
+) -> ProposalRecord | JSONResponse:
+    request_id, trace_id = request_identity()
+    preview, error = await browser_session_call(
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        success_event_type="browser_submit_preview",
+        denied_event_type="browser_submit_preview_denied",
+        error_event_type="browser_submit_preview_error",
+        success_summary=browser_submit_preview_summary,
+        fallback_error_summary={
+            "session_id": session_id,
+            "snapshot_id": payload.snapshot_id,
+            "current_url": "",
+            "host": "",
+        },
+        call=lambda: app.state.clients.browser_prepare_submit(session_id, payload),
+    )
+    if error is not None:
+        return error
+
+    target_host = urlsplit(preview.target_url).hostname or ""
+    if target_host not in app.state.settings.action_allowlist_hosts:
+        append_event(
+            event_type="browser_submit_proposal_denied",
+            actor=actor,
+            request_id=request_id,
+            trace_id=trace_id,
+            outcome="denied",
+            summary={
+                **browser_submit_preview_summary(preview, reason="host_not_in_action_allowlist"),
+                "action_allowlist_hosts": sorted(app.state.settings.action_allowlist_hosts),
+            },
+        )
+        return JSONResponse(
+            status_code=403,
+            headers=make_headers(request_id, trace_id),
+            content={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "reason": "host_not_in_action_allowlist",
+                "host": target_host,
+                "action_allowlist_hosts": sorted(app.state.settings.action_allowlist_hosts),
+            },
+        )
+
+    record = app.state.proposal_store.create_proposal(
+        action_type="browser_submit",
+        action_payload={
+            "session_id": preview.session_id,
+            "snapshot_id": preview.snapshot_id,
+            "submit_element_id": preview.submit_element_id,
+            "target_url": preview.target_url,
+            "method": preview.method,
+            "field_preview": [field.model_dump() for field in preview.field_preview],
+        },
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+    )
+    append_event(
+        event_type="browser_submit_proposal_created",
+        actor=actor,
+        request_id=request_id,
+        trace_id=trace_id,
+        outcome="success",
+        summary={
+            "proposal_id": record.proposal_id,
+            "action_type": record.action_type,
+            **browser_submit_preview_summary(preview),
+        },
+    )
+    response.headers.update(make_headers(request_id, trace_id))
+    return record
 
 
 async def run_probe(probe_kind: str) -> EgressProbeReport | JSONResponse:

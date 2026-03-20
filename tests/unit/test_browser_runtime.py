@@ -36,3 +36,5 @@ def test_browser_health_exposes_runtime_hardening_details(monkeypatch):
     assert "launch_args" in body["details"]
     assert "--no-sandbox" not in body["details"]["launch_args"]
     assert "--disable-setuid-sandbox" not in body["details"]["launch_args"]
+    assert body["details"]["session_max_concurrent"] == 4
+    assert body["details"]["session_ttl_seconds"] == 900

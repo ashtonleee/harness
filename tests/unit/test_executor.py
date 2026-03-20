@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from shared.schemas import EgressFetchResponse, ProposalRecord
+from shared.schemas import (
+    BrowserSessionSnapshotInternalResponse,
+    BrowserSubmitExecuteInternalResponse,
+    EgressFetchResponse,
+    ProposalRecord,
+)
 from trusted.bridge.executor import execute_proposal
 
 
@@ -220,3 +225,117 @@ async def test_http_post_egress_unreachable_returns_error():
         proposal, clients=clients, action_allowlist_hosts=ALLOWLIST,
     )
     assert "egress_unreachable" in result["error"]
+
+
+# --- browser_submit ---
+
+
+@pytest.mark.anyio
+async def test_browser_submit_requires_action_payload_fields():
+    proposal = _make_proposal("browser_submit", {"session_id": "session-1"})
+    result = await execute_proposal(
+        proposal,
+        clients=_mock_clients(),
+        action_allowlist_hosts=ALLOWLIST,
+    )
+    assert result["error"] == "action_payload.snapshot_id is required"
+
+
+@pytest.mark.anyio
+async def test_browser_submit_host_not_in_action_allowlist_returns_error():
+    proposal = _make_proposal(
+        "browser_submit",
+        {
+            "session_id": "session-1",
+            "snapshot_id": "snap-1",
+            "submit_element_id": "el_001",
+            "target_url": "http://blocked.test/browser/interactive-result",
+            "method": "POST",
+        },
+    )
+    result = await execute_proposal(
+        proposal,
+        clients=_mock_clients(),
+        action_allowlist_hosts=ALLOWLIST,
+    )
+    assert result["error"] == "host_not_in_action_allowlist"
+
+
+@pytest.mark.anyio
+async def test_browser_submit_success_returns_structured_result():
+    clients = AsyncMock()
+    clients.browser_execute_submit.return_value = BrowserSubmitExecuteInternalResponse(
+        session_id="session-1",
+        target_url="http://example.com/action",
+        method="POST",
+        field_preview=[],
+        snapshot=BrowserSessionSnapshotInternalResponse(
+            session_id="session-1",
+            snapshot_id="snap-2",
+            current_url="http://example.com/result",
+            http_status=200,
+            page_title="Result",
+            meta_description="",
+            rendered_text="Submitted ok",
+            rendered_text_sha256="sha-text",
+            text_bytes=12,
+            text_truncated=False,
+            screenshot_png_base64="",
+            screenshot_sha256="sha-shot",
+            screenshot_bytes=0,
+            observed_hosts=["example.com"],
+            resolved_ips=["1.2.3.4"],
+            channel_records=[],
+            interactable_elements=[],
+        ),
+    )
+    proposal = _make_proposal(
+        "browser_submit",
+        {
+            "session_id": "session-1",
+            "snapshot_id": "snap-1",
+            "submit_element_id": "el_001",
+            "target_url": "http://example.com/action",
+            "method": "POST",
+            "field_preview": [{"name": "name", "value_preview": "alice", "kind": "text"}],
+        },
+    )
+    result = await execute_proposal(
+        proposal,
+        clients=clients,
+        action_allowlist_hosts=ALLOWLIST,
+    )
+    assert result["target_url"] == "http://example.com/action"
+    assert result["current_url"] == "http://example.com/result"
+    assert result["page_title"] == "Result"
+    assert result["snapshot_id"] == "snap-2"
+
+
+@pytest.mark.anyio
+async def test_browser_submit_missing_session_maps_cleanly():
+    error_response = httpx.Response(
+        404,
+        json={"detail": {"reason": "browser_session_missing", "detail": "session-1"}},
+    )
+    clients = AsyncMock()
+    clients.browser_execute_submit.side_effect = httpx.HTTPStatusError(
+        "missing",
+        request=httpx.Request("POST", "http://browser/internal/sessions/session-1/execute-submit"),
+        response=error_response,
+    )
+    proposal = _make_proposal(
+        "browser_submit",
+        {
+            "session_id": "session-1",
+            "snapshot_id": "snap-1",
+            "submit_element_id": "el_001",
+            "target_url": "http://example.com/action",
+            "method": "POST",
+        },
+    )
+    result = await execute_proposal(
+        proposal,
+        clients=clients,
+        action_allowlist_hosts=ALLOWLIST,
+    )
+    assert result["error"] == "browser_session_missing"

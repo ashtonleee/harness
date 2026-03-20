@@ -798,6 +798,116 @@ async def browser_form_target():
     return PlainTextResponse("form target\n")
 
 
+@app.get("/browser/interactive-form")
+async def browser_interactive_form():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Interactive form fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Interactive form fixture</h1>
+      <p>Use the controls below to prepare a gated submit.</p>
+      <form action="http://allowed.test/browser/interactive-result" method="post">
+        <label>
+          Name
+          <input type="text" name="name" value="fixture" />
+        </label>
+        <label>
+          Plan
+          <select name="plan">
+            <option value="basic">Basic</option>
+            <option value="pro">Pro</option>
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" name="agree" value="yes" />
+          I agree
+        </label>
+        <button type="submit">Claim reward</button>
+      </form>
+      <p><a href="http://allowed.test/browser/interactive-help">Read more</a></p>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/interactive-form-disallowed")
+async def browser_interactive_form_disallowed():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Interactive disallowed form fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Interactive disallowed form fixture</h1>
+      <p>This form is readable, but its submit target is outside the action allowlist.</p>
+      <form action="http://allowed-two.test/browser/interactive-result" method="post">
+        <label>
+          Name
+          <input type="text" name="name" value="fixture" />
+        </label>
+        <button type="submit">Try blocked submit</button>
+      </form>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.get("/browser/interactive-help")
+async def browser_interactive_help():
+    return HTMLResponse(
+        """
+<!doctype html>
+<html>
+  <head>
+    <title>Interactive help fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Interactive help fixture</h1>
+      <p>This page stays allowlisted and can be reached through an interactive click.</p>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
+@app.post("/browser/interactive-result")
+async def browser_interactive_result(request: Request):
+    form = await request.form()
+    name = str(form.get("name", ""))
+    plan = str(form.get("plan", ""))
+    agree = str(form.get("agree", ""))
+    return HTMLResponse(
+        f"""
+<!doctype html>
+<html>
+  <head>
+    <title>Interactive result fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Interactive result fixture</h1>
+      <p>Submitted name={name} plan={plan} agree={agree or "no"}.</p>
+    </main>
+  </body>
+</html>
+""".strip()
+    )
+
+
 @app.get("/browser/events")
 async def browser_events():
     return Response(

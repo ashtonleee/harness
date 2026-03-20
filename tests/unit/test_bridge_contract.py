@@ -7,8 +7,10 @@ import pytest
 from trusted.bridge.app import app
 from trusted.bridge.clients import TrustedBridgeClients
 from shared.schemas import (
+    BrowserInteractable,
     BrowserFollowHrefInternalResponse,
     BrowserRenderInternalResponse,
+    BrowserSessionSnapshotInternalResponse,
     ChatChoice,
     ChatCompletionResponse,
     ChatMessage,
@@ -99,6 +101,7 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert body["surfaces"]["read_only_web"] == "trusted_fetcher_stage5_read_only_get"
     assert body["surfaces"]["browser"] == "trusted_browser_stage6a_read_only_render"
     assert body["surfaces"]["browser_follow_href"] == "trusted_browser_stage6b_safe_follow_href"
+    assert body["surfaces"]["browser_interactive_sessions"] == "trusted_browser_stage8_interactive_sessions"
     assert body["surfaces"]["approvals"] == "active_proposal_approval_flow_stage7"
     assert body["surfaces"]["consequential_actions"] == "active_consequential_actions_stage8"
     assert body["log_path"].endswith("bridge_events.jsonl")
@@ -120,6 +123,8 @@ def test_bridge_status_exposes_budget_and_trusted_state_surfaces(monkeypatch, tm
     assert body["browser"]["counters"]["browser_follow_href_total"] == 0
     assert body["browser"]["caps"]["max_follow_hops"] == 1
     assert body["browser"]["caps"]["max_followable_links"] == 20
+    assert body["browser"]["caps"]["session_max_concurrent"] == 4
+    assert body["browser"]["caps"]["session_ttl_seconds"] == 900
     assert body["browser"]["recent_follows"] == []
     assert isinstance(body["recent_requests"], list)
 
@@ -284,6 +289,38 @@ def _patched_route_result(case: str):
 
         return "browser_follow_href", fake_browser_follow_href
 
+    if case == "browser_session_open":
+        async def fake_browser_session_open(self, payload):
+            return BrowserSessionSnapshotInternalResponse(
+                session_id="session-1",
+                snapshot_id="snapshot-1",
+                current_url=payload.url,
+                http_status=200,
+                page_title="Interactive form fixture",
+                meta_description="",
+                rendered_text="Interactive form fixture",
+                rendered_text_sha256="interactive-text-sha256",
+                text_bytes=24,
+                text_truncated=False,
+                screenshot_png_base64=TINY_PNG_BASE64,
+                screenshot_sha256="interactive-screenshot-sha256",
+                screenshot_bytes=67,
+                observed_hosts=["allowed.test"],
+                resolved_ips=["93.184.216.34"],
+                channel_records=[],
+                interactable_elements=[
+                    BrowserInteractable(
+                        element_id="el_001",
+                        kind="text_input",
+                        label="Name",
+                        name="name",
+                        value_preview="",
+                    )
+                ],
+            )
+
+        return "browser_session_open", fake_browser_session_open
+
     raise ValueError(f"unsupported spoof test case: {case}")
 
 
@@ -321,8 +358,16 @@ def _patched_route_result(case: str):
             },
             "browser_follow_href",
         ),
+        (
+            "browser_session_open",
+            "/web/browser/sessions/open",
+            {
+                "url": "http://allowed.test/browser/interactive-form",
+            },
+            "browser_session_open",
+        ),
     ],
-    ids=["llm", "fetch", "browser-render", "browser-follow"],
+    ids=["llm", "fetch", "browser-render", "browser-follow", "browser-session-open"],
 )
 def test_agent_facing_routes_ignore_spoofed_actor_headers(
     monkeypatch,

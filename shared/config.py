@@ -36,6 +36,8 @@ DEFAULT_BROWSER_MAX_RENDERED_TEXT_BYTES = 16384
 DEFAULT_BROWSER_MAX_SCREENSHOT_BYTES = 1024 * 1024
 DEFAULT_BROWSER_MAX_FOLLOWABLE_LINKS = 20
 DEFAULT_BROWSER_MAX_FOLLOW_HOPS = 1
+DEFAULT_BROWSER_SESSION_MAX_CONCURRENT = 4
+DEFAULT_BROWSER_SESSION_TTL_SECONDS = 15 * 60
 DEFAULT_AGENT_TOKEN = "rsi-agent-token-dev-sentinel"
 DEFAULT_OPERATOR_TOKEN = "rsi-operator-token-dev-sentinel"
 DEFAULT_ACTION_ALLOWLIST_HOSTS: tuple[str, ...] = ()
@@ -116,6 +118,8 @@ class BridgeSettings:
     browser_max_screenshot_bytes: int
     browser_max_followable_links: int
     browser_max_follow_hops: int
+    browser_session_max_concurrent: int
+    browser_session_ttl_seconds: int
     enable_debug_probes: bool
     agent_token: str
     operator_token: str
@@ -141,6 +145,8 @@ class BrowserSettings:
     max_screenshot_bytes: int
     max_followable_links: int
     max_follow_hops: int
+    session_max_concurrent: int
+    session_ttl_seconds: int
     enable_private_test_hosts: bool
 
 
@@ -276,6 +282,18 @@ def bridge_settings() -> BridgeSettings:
             str(DEFAULT_BROWSER_MAX_FOLLOW_HOPS),
         ).strip()
     )
+    browser_session_max_concurrent = int(
+        os.environ.get(
+            "RSI_BROWSER_SESSION_MAX_CONCURRENT",
+            str(DEFAULT_BROWSER_SESSION_MAX_CONCURRENT),
+        ).strip()
+    )
+    browser_session_ttl_seconds = int(
+        os.environ.get(
+            "RSI_BROWSER_SESSION_TTL_SECONDS",
+            str(DEFAULT_BROWSER_SESSION_TTL_SECONDS),
+        ).strip()
+    )
     assert browser_timeout_seconds > 0
     assert browser_viewport_width > 0
     assert browser_viewport_height > 0
@@ -284,6 +302,8 @@ def bridge_settings() -> BridgeSettings:
     assert browser_max_screenshot_bytes > 0
     assert browser_max_followable_links > 0
     assert browser_max_follow_hops == 1
+    assert browser_session_max_concurrent > 0
+    assert browser_session_ttl_seconds > 0
     agent_token = os.environ.get("RSI_AGENT_TOKEN", DEFAULT_AGENT_TOKEN).strip()
     operator_token = os.environ.get("RSI_OPERATOR_TOKEN", DEFAULT_OPERATOR_TOKEN).strip()
     assert agent_token, "RSI_AGENT_TOKEN must not be empty"
@@ -358,6 +378,8 @@ def bridge_settings() -> BridgeSettings:
         browser_max_screenshot_bytes=browser_max_screenshot_bytes,
         browser_max_followable_links=browser_max_followable_links,
         browser_max_follow_hops=browser_max_follow_hops,
+        browser_session_max_concurrent=browser_session_max_concurrent,
+        browser_session_ttl_seconds=browser_session_ttl_seconds,
         enable_debug_probes=_env_flag("RSI_ENABLE_DEBUG_PROBES"),
         agent_token=agent_token,
         operator_token=operator_token,
@@ -473,6 +495,18 @@ def browser_settings() -> BrowserSettings:
             str(DEFAULT_BROWSER_MAX_FOLLOW_HOPS),
         ).strip()
     )
+    browser_session_max_concurrent = int(
+        os.environ.get(
+            "RSI_BROWSER_SESSION_MAX_CONCURRENT",
+            str(DEFAULT_BROWSER_SESSION_MAX_CONCURRENT),
+        ).strip()
+    )
+    browser_session_ttl_seconds = int(
+        os.environ.get(
+            "RSI_BROWSER_SESSION_TTL_SECONDS",
+            str(DEFAULT_BROWSER_SESSION_TTL_SECONDS),
+        ).strip()
+    )
     assert browser_timeout_seconds > 0
     assert browser_viewport_width > 0
     assert browser_viewport_height > 0
@@ -481,6 +515,8 @@ def browser_settings() -> BrowserSettings:
     assert browser_max_screenshot_bytes > 0
     assert browser_max_followable_links > 0
     assert browser_max_follow_hops == 1
+    assert browser_session_max_concurrent > 0
+    assert browser_session_ttl_seconds > 0
 
     return BrowserSettings(
         service_name="browser",
@@ -509,6 +545,8 @@ def browser_settings() -> BrowserSettings:
         max_screenshot_bytes=browser_max_screenshot_bytes,
         max_followable_links=browser_max_followable_links,
         max_follow_hops=browser_max_follow_hops,
+        session_max_concurrent=browser_session_max_concurrent,
+        session_ttl_seconds=browser_session_ttl_seconds,
         enable_private_test_hosts=_env_flag(
             "RSI_FETCH_ENABLE_PRIVATE_TEST_HOSTS",
             default=True,

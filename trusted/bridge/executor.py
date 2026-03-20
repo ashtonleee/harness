@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from shared.schemas import EgressFetchRequest, ProposalRecord
+from shared.schemas import BrowserSubmitExecuteRequest, EgressFetchRequest, ProposalRecord
 from trusted.bridge.clients import TrustedBridgeClients
 
 
@@ -31,6 +31,12 @@ async def execute_proposal(
             action_allowlist_hosts=action_allowlist_hosts,
             action_max_body_bytes=action_max_body_bytes,
             action_max_response_bytes=action_max_response_bytes,
+        )
+    if proposal.action_type == "browser_submit":
+        return await _execute_browser_submit(
+            proposal,
+            clients=clients,
+            action_allowlist_hosts=action_allowlist_hosts,
         )
     return {"error": f"unsupported action_type: {proposal.action_type}"}
 
@@ -121,4 +127,89 @@ async def _execute_http_post(
         "response_byte_count": len(response_body_raw),
         "response_body_preview": response_body_preview,
         "response_body_sha256": response_body_sha256,
+    }
+
+
+async def _execute_browser_submit(
+    proposal: ProposalRecord,
+    *,
+    clients: TrustedBridgeClients,
+    action_allowlist_hosts: set[str],
+) -> dict[str, Any]:
+    payload = proposal.action_payload
+    session_id = str(payload.get("session_id", "")).strip()
+    snapshot_id = str(payload.get("snapshot_id", "")).strip()
+    submit_element_id = str(payload.get("submit_element_id", "")).strip()
+    target_url = str(payload.get("target_url", "")).strip()
+    method = str(payload.get("method", "")).strip().upper()
+    field_preview = payload.get("field_preview", [])
+
+    if not session_id:
+        return {"error": "action_payload.session_id is required"}
+    if not snapshot_id:
+        return {"error": "action_payload.snapshot_id is required"}
+    if not submit_element_id:
+        return {"error": "action_payload.submit_element_id is required"}
+    if not target_url:
+        return {"error": "action_payload.target_url is required"}
+
+    host = (urlsplit(target_url).hostname or "").lower()
+    if not host:
+        return {"error": f"cannot parse host from target_url: {target_url}"}
+    if host not in action_allowlist_hosts:
+        return {
+            "error": "host_not_in_action_allowlist",
+            "host": host,
+            "action_allowlist_hosts": sorted(action_allowlist_hosts),
+        }
+
+    try:
+        execute_result = await clients.browser_execute_submit(
+            session_id,
+            BrowserSubmitExecuteRequest(
+                snapshot_id=snapshot_id,
+                element_id=submit_element_id,
+            ),
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = {}
+        try:
+            detail = exc.response.json()
+        except Exception:
+            pass
+        reason = ""
+        if isinstance(detail, dict):
+            if isinstance(detail.get("detail"), dict):
+                reason = str(detail["detail"].get("reason", "")).strip()
+            else:
+                reason = str(detail.get("reason", "")).strip()
+        if reason in {"browser_session_missing", "browser_snapshot_stale"}:
+            return {
+                "error": reason,
+                "detail": detail,
+            }
+        return {
+            "error": "browser_submit_denied",
+            "browser_status": exc.response.status_code,
+            "detail": detail,
+        }
+    except httpx.HTTPError as exc:
+        return {"error": f"browser_unreachable: {type(exc).__name__}: {exc}"}
+
+    snapshot = execute_result.snapshot
+    return {
+        "target_url": target_url,
+        "method": method or execute_result.method,
+        "field_preview": field_preview if isinstance(field_preview, list) else [],
+        "current_url": snapshot.current_url,
+        "http_status": snapshot.http_status,
+        "page_title": snapshot.page_title,
+        "meta_description": snapshot.meta_description,
+        "rendered_text_sha256": snapshot.rendered_text_sha256,
+        "text_bytes": snapshot.text_bytes,
+        "text_truncated": snapshot.text_truncated,
+        "screenshot_sha256": snapshot.screenshot_sha256,
+        "screenshot_bytes": snapshot.screenshot_bytes,
+        "session_id": execute_result.session_id,
+        "snapshot_id": snapshot.snapshot_id,
     }

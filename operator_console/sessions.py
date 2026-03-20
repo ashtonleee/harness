@@ -185,6 +185,8 @@ class SessionManager:
                 "last_run_id": "",
                 "summary_path": "",
                 "last_proposal": {},
+                "browser_session": {},
+                "browser_execution_consumed": False,
                 "current_screenshot_path": "",
                 "error": "",
             },
@@ -213,6 +215,7 @@ class SessionManager:
         raw_snapshot = {
             "session": session.to_dict(),
             "workspace_state": workspace_state,
+            "browser_session": workspace_state.get("browser_session", {}),
             "transcript": transcript,
             "current_screenshot": current_screenshot,
             "recent_screenshots": recent_screenshots,
