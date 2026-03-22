@@ -1,265 +1,123 @@
 services:
+  egress-proxy:
+    build:
+      context: .
+      dockerfile: trusted/proxy/Dockerfile
+    environment:
+      PROXY_ALLOWLIST: ${PROXY_ALLOWLIST:-httpbin.org}
+      PROXY_LOG_PATH: /var/log/rsi/web_egress.jsonl
+      PROXY_PROPOSAL_URL: http://bridge:8081/proposals
+      PROXY_ALLOWLIST_PATH: /etc/rsi/proxy_allowlist.txt
+      PROXY_CERT_EXPORT_DIR: /proxy-ca-cert
+    volumes:
+      - ./trusted/proxy/addon.py:/opt/proxy/addon.py:ro
+      - proxy-ca:/root/.mitmproxy
+      - proxy-ca-cert:/proxy-ca-cert
+      - ./state/logs:/var/log/rsi
+      - ./state/proxy:/etc/rsi
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; s = socket.create_connection(("127.0.0.1", 8084), 2); s.close()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - internal_net
+      - external_net
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+      - --host
+      - 0.0.0.0
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      DEFAULT_BATCH_SIZE: "1"
+    volumes:
+      - ./trusted/litellm/litellm_config.yaml:/app/config.yaml:ro
+      - ./state/litellm:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/health/liveliness", timeout=5).read()
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - internal_net
+      - external_net
+
   bridge:
     build:
       context: .
       dockerfile: trusted/bridge/Dockerfile
-    command:
-      - uvicorn
-      - trusted.bridge.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
     environment:
-      RSI_TRUSTED_STATE_DIR: /var/lib/rsi/trusted_state
-      RSI_LITELLM_URL: http://litellm:4000
-      RSI_FETCHER_URL: http://fetcher:8082
-      RSI_BROWSER_URL: http://browser:8083
-      RSI_EGRESS_URL: http://egress:8084
-      RSI_AGENT_URL: http://agent:8001
-      RSI_LLM_BUDGET_TOKEN_CAP: ${RSI_LLM_BUDGET_TOKEN_CAP:-100}
-      RSI_BUDGET_UNIT: mock_tokens
-      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
-      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
-      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
-      RSI_ENABLE_DEBUG_PROBES: ${RSI_ENABLE_DEBUG_PROBES:-0}
-      RSI_AGENT_TOKEN: ${RSI_AGENT_TOKEN:-rsi-agent-token-dev-sentinel}
-      RSI_OPERATOR_TOKEN: ${RSI_OPERATOR_TOKEN:-rsi-operator-token-dev-sentinel}
-      RSI_ACTION_ALLOWLIST_HOSTS: ${RSI_ACTION_ALLOWLIST_HOSTS:-}
+      PROPOSALS_DIR: /var/lib/rsi/proposals
+      RSI_BUDGET_USD: ${RSI_BUDGET_USD:-5.00}
     volumes:
-      - ${RSI_TRUSTED_STATE_HOST_DIR:-./runtime/trusted_state}:/var/lib/rsi/trusted_state
+      - ./state/proposals:/var/lib/rsi/proposals
+      - ./state/logs:/var/log/rsi
+      - ./state/proxy:/etc/rsi
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/healthz", timeout=5).read()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - internal_net
+      - external_net
+
+  sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
     depends_on:
+      egress-proxy:
+        condition: service_healthy
       litellm:
         condition: service_healthy
-      fetcher:
-        condition: service_healthy
-      browser:
-        condition: service_healthy
-      egress:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - agent_net
-      - trusted_net
-
-  litellm:
-    build:
-      context: .
-      dockerfile: trusted/litellm/Dockerfile
-    command:
-      - uvicorn
-      - trusted.litellm.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "4000"
-    environment:
-      RSI_LITELLM_RESPONSE_MODE: ${RSI_LITELLM_RESPONSE_MODE:-deterministic_mock}
-      RSI_OPENAI_BASE_URL: ${RSI_OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-stage1-sentinel-provider-key}
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - trusted_net
-      - egress_net
-
-  fetcher:
-    build:
-      context: .
-      dockerfile: trusted/fetcher/Dockerfile
-    command:
-      - uvicorn
-      - trusted.fetcher.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8082"
-    environment:
-      RSI_FETCHER_URL: http://fetcher:8082
-      RSI_EGRESS_URL: http://egress:8084
-      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
-      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
-      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
-    depends_on:
-      webfixture:
-        condition: service_healthy
-      egress:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8082/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - trusted_net
-
-  browser:
-    build:
-      context: .
-      dockerfile: trusted/browser/Dockerfile
-    command:
-      - uvicorn
-      - trusted.browser.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8083"
-    environment:
-      RSI_BROWSER_URL: http://browser:8083
-      RSI_EGRESS_URL: http://egress:8084
-      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
-      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
-      RSI_BROWSER_VIEWPORT_WIDTH: ${RSI_BROWSER_VIEWPORT_WIDTH:-1280}
-      RSI_BROWSER_VIEWPORT_HEIGHT: ${RSI_BROWSER_VIEWPORT_HEIGHT:-720}
-      RSI_BROWSER_TIMEOUT_SECONDS: ${RSI_BROWSER_TIMEOUT_SECONDS:-10}
-      RSI_BROWSER_SETTLE_TIME_MS: ${RSI_BROWSER_SETTLE_TIME_MS:-500}
-      RSI_BROWSER_MAX_RENDERED_TEXT_BYTES: ${RSI_BROWSER_MAX_RENDERED_TEXT_BYTES:-16384}
-      RSI_BROWSER_MAX_SCREENSHOT_BYTES: ${RSI_BROWSER_MAX_SCREENSHOT_BYTES:-1048576}
-      HOME: /home/browseruser
-    security_opt:
-      - no-new-privileges:true
-      - seccomp=./trusted/browser/chromium-seccomp.json
-    tmpfs:
-      - /tmp
-    depends_on:
-      webfixture:
-        condition: service_healthy
-      egress:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8083/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - trusted_net
-
-  egress:
-    build:
-      context: .
-      dockerfile: trusted/egress/Dockerfile
-    command:
-      - uvicorn
-      - trusted.egress.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8084"
-    environment:
-      RSI_EGRESS_URL: http://egress:8084
-      RSI_WEB_ALLOWLIST_HOSTS: ${RSI_WEB_ALLOWLIST_HOSTS:-example.com}
-      RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS: ${RSI_FETCH_ALLOW_PRIVATE_TEST_HOSTS:-}
-      RSI_FETCH_ALLOWED_CONTENT_TYPES: ${RSI_FETCH_ALLOWED_CONTENT_TYPES:-text/plain,text/html}
-      RSI_EGRESS_TEST_IP_OVERRIDES: ${RSI_EGRESS_TEST_IP_OVERRIDES:-}
-    depends_on:
-      webfixture:
-        condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8084/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - trusted_net
-      - egress_net
-
-  agent:
-    build:
-      context: .
-      dockerfile: untrusted/agent/Dockerfile
-    command:
-      - uvicorn
-      - untrusted.agent.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8001"
-    environment:
-      RSI_BRIDGE_URL: http://bridge:8000
-      RSI_AGENT_WORKSPACE_DIR: /workspace/agent
-      RSI_AGENT_RUNTIME_CODE_DIR: /app/untrusted
-      RSI_AGENT_TOKEN: ${RSI_AGENT_TOKEN:-rsi-agent-token-dev-sentinel}
-      HOME: /tmp
-      TMPDIR: /tmp
-    volumes:
-      - ${RSI_AGENT_WORKSPACE_HOST_DIR:-./untrusted/agent_workspace}:/workspace/agent
-    read_only: true
-    tmpfs:
-      - /tmp
-    depends_on:
       bridge:
         condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    environment:
+      HTTP_PROXY: http://egress-proxy:8084
+      HTTPS_PROXY: http://egress-proxy:8084
+      NO_PROXY: litellm,bridge,localhost,127.0.0.1
+      LITELLM_URL: http://litellm:4000
+      WALLET_URL: http://bridge:8081
+      RSI_MODEL: ${RSI_MODEL:-default}
+      RSI_MAX_TURNS: ${RSI_MAX_TURNS:-0}
+      # GIT_REMOTE_URL: ${GIT_REMOTE_URL:-}  # Uncomment to enable git push on exit
+    volumes:
+      - ./sandbox/seed:/workspace/agent
+      - ./sandbox/supervisor.py:/opt/supervisor/supervisor.py:ro
+      - proxy-ca-cert:/usr/local/share/ca-certificates:ro
+      - ./shared/chromium-seccomp.json:/opt/chromium-seccomp.json:ro
+    pids_limit: 256
+    security_opt:
+      - seccomp=./shared/chromium-seccomp.json
     networks:
-      - agent_net
-
-  webfixture:
-    build:
-      context: .
-      dockerfile: tests/fixtures/webfixture/Dockerfile
-    command:
-      - uvicorn
-      - app:app
-      - --app-dir
-      - /app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "80"
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1/healthz", timeout=2).read()
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      egress_net:
-        aliases:
-          - allowed.test
-          - allowed-two.test
-          - blocked.test
+      - internal_net
 
 networks:
-  agent_net:
+  internal_net:
     internal: true
-  trusted_net:
-    internal: true
-  egress_net: {}
+  external_net: {}
+
+volumes:
+  proxy-ca: {}
+  proxy-ca-cert: {}

@@ -1,3 +1,3 @@
 # rsi-econ
 
-Sandboxed agent infrastructure. Docker-based containment with trusted bridge, canonical logging, budget enforcement, and approval-gated external actions. See `RSI_IMPLEMENTATION_SPEC.md` for the staged build order.
+Autonomous agent in a sandboxed container with a finite budget. The agent can rewrite its own code; safety is enforced by the container boundary, not by prompting. Transparent proxy for network mediation, PID-1 supervisor with crash rollback, Discord-based operator interface.
