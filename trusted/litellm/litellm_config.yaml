@@ -1,0 +1,30 @@
+model_list:
+  - model_name: "default"
+    litellm_params:
+      model: "openrouter/minimax/minimax-m2.7"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+  - model_name: "minimax-m2.7"
+    litellm_params:
+      model: "openrouter/minimax/minimax-m2.7"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+  - model_name: "gpt-4.1"
+    litellm_params:
+      model: "openrouter/openai/gpt-4.1"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+  - model_name: "gpt-4.1-mini"
+    litellm_params:
+      model: "openrouter/openai/gpt-4.1-mini"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+litellm_settings:
+  callbacks: ["webhook"]
+  max_budget: 5.0
+  budget_duration: "monthly"
+
+callback_settings:
+  webhook:
+    callback_type: generic_api
+    endpoint: "http://bridge:8081/llm_usage"
+    headers:
+      Content-Type: application/json
+    log_format: single
