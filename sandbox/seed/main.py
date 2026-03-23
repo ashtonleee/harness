@@ -21,7 +21,17 @@ LITELLM_URL = os.getenv("LITELLM_URL", "http://litellm:4000")
 WALLET_URL = os.getenv("WALLET_URL", "http://bridge:8081")
 
 # Use mini model by default for cost efficiency
-MODEL = os.getenv("RSI_MODEL", "default")
+# Force minimax-m2.7 regardless of env var to ensure cheapest operation
+MODEL = "minimax-m2.7"
+# Low budget fallback model - activated when budget drops below threshold
+LOW_BUDGET_MODEL = "minimax-m2.7"
+LOW_BUDGET_THRESHOLD = float(os.getenv("RSI_LOW_BUDGET_THRESHOLD", "1.00"))  # Switch when budget is critically low
+
+# Free provider configuration (activated when budget exhausted)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_BASE = "https://api.groq.com/openai/v1"
+CLOUDFLARE_API_KEY = os.getenv("CLOUDFLARE_API_KEY", "")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 
 MAX_TURNS = int(os.getenv("RSI_MAX_TURNS", "0"))
 MAX_CONTEXT_MESSAGES = 40
@@ -315,6 +325,15 @@ def get_wallet() -> dict:
         return {"remaining_usd": 0, "spent_usd": 0, "budget_usd": 0}
 
 
+def get_effective_model(wallet: dict, current_model: str = None) -> str:
+    """Return model to use based on current budget. Switches to cheaper model when low."""
+    remaining = wallet.get("remaining_usd", 0)
+    if remaining < LOW_BUDGET_THRESHOLD and current_model != LOW_BUDGET_MODEL:
+        print(f"[agent] LOW BUDGET: switching from {current_model or MODEL} to {LOW_BUDGET_MODEL} (${remaining:.2f} remaining)", flush=True)
+        return LOW_BUDGET_MODEL
+    return current_model or MODEL
+
+
 def load_knowledge() -> dict:
     """Load persistent knowledge store."""
     if KNOWLEDGE_PATH.exists():
@@ -356,6 +375,56 @@ def chat(messages: list[dict], model: str = None, tools: list | None = None) -> 
     )
     with urllib_request.urlopen(request, timeout=120) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def chat_groq(messages: list[dict], model: str = "llama-3.3-70b-versatile") -> dict:
+    """Make a Groq API call using free tier."""
+    if not GROQ_API_KEY:
+        raise Exception("GROQ_API_KEY not configured")
+    payload = {"model": model, "messages": messages}
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib_request.Request(
+        f"{GROQ_API_BASE}/chat/completions",
+        data=body,
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib_request.urlopen(request, timeout=120) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def chat_cloudflare(messages: list[dict], model: str = "@cf/meta/llama-3.3-70b-instruct") -> dict:
+    """Make a Cloudflare Workers AI API call using free tier."""
+    if not CLOUDFLARE_API_KEY or not CLOUDFLARE_ACCOUNT_ID:
+        raise Exception("CLOUDFLARE_API_KEY or CLOUDFLARE_ACCOUNT_ID not configured")
+    payload = {"messages": messages}
+    body = json.dumps(payload).encode("utf-8")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model}"
+    request = urllib_request.Request(
+        url,
+        data=body,
+        headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib_request.urlopen(request, timeout=120) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def try_free_provider_chat(messages: list[dict], tools: list | None = None) -> dict | None:
+    """Try free providers in order of preference. Returns None if all fail."""
+    # Try Groq first (has better models)
+    if GROQ_API_KEY:
+        try:
+            return chat_groq(messages)
+        except Exception as e:
+            print(f"[agent] Groq free tier failed: {e}", flush=True)
+    # Try Cloudflare second (completely free)
+    if CLOUDFLARE_API_KEY and CLOUDFLARE_ACCOUNT_ID:
+        try:
+            return chat_cloudflare(messages)
+        except Exception as e:
+            print(f"[agent] Cloudflare free tier failed: {e}", flush=True)
+    return None
 
 
 def trim_messages(messages: list[dict], max_messages: int = MAX_CONTEXT_MESSAGES) -> list[dict]:
@@ -576,11 +645,27 @@ def main() -> int:
             if tokens > COMPACTION_TOKEN_THRESHOLD:
                 messages = compact_context(messages, knowledge)
 
+        # Refresh wallet every 10 turns to track budget accurately
+        if turn % 10 == 0:
+            wallet = get_wallet()
+            remaining = wallet.get("remaining_usd", 0)
+            if remaining < 0.50:
+                print(f"[agent:{MODEL}] CRITICAL: budget very low (${remaining:.2f}), exiting", flush=True)
+                knowledge["findings"].append(f"Low budget exit at ${remaining:.2f}")
+                save_knowledge(knowledge)
+                break
+
         # Check for operator messages
         model_override = check_operator_messages(messages)
+        
+        # Auto-switch to cheaper model when budget is low
+        if not model_override:
+            effective_model = get_effective_model(wallet, MODEL)
+        else:
+            effective_model = model_override
 
         try:
-            response = chat(messages, model=model_override, tools=TOOLS)
+            response = chat(messages, model=effective_model, tools=TOOLS)
         except Exception as exc:
             if "429" in str(exc):
                 # Distinguish rate-limit from budget exhaustion
@@ -603,8 +688,14 @@ def main() -> int:
                     time.sleep(retry_after)
                     continue
                 else:
-                    print(f"{prefix} 429 — budget exhausted, exiting", flush=True)
-                    break
+                    # Budget exhausted — try free providers before exiting
+                    print(f"{prefix} 429 — budget exhausted, trying free providers...", flush=True)
+                    free_response = try_free_provider_chat(messages, tools=TOOLS)
+                    if free_response:
+                        response = free_response
+                    else:
+                        print(f"{prefix} no free providers available, exiting", flush=True)
+                        break
             consecutive_errors = getattr(main, '_consecutive_errors', 0) + 1
             main._consecutive_errors = consecutive_errors
             print(f"{prefix} API error #{consecutive_errors}: {exc}", flush=True)

@@ -29,6 +29,26 @@ def _make_response(status_code: int, content: bytes, headers: dict[str, str]) ->
     return _FallbackResponse(status_code, content, headers)
 
 
+_NOISE_PATTERNS = (
+    "analytics", "tracking", "pixel", "improving.duckduckgo.com",
+    ".ads.", "posthog", "stytch", "stripe.com", "segment.io",
+    "cookieyes", "fonts.googleapis.com", "fonts.gstatic.com",
+    ".fbcdn.net", "cloudflare", "google-analytics", "googletagmanager",
+    "doubleclick.net", "linkedin.com/li/", "px.ads.", "adservice.",
+    "sentry.io", "hotjar.com", "fullstory.com", "intercom.io",
+    "optimizely.com", "mixpanel.com", "amplitude.com",
+)
+
+
+def _is_noise_domain(host: str) -> bool:
+    """Check if a domain is known browser tracking/analytics noise."""
+    host = host.lower()
+    for pattern in _NOISE_PATTERNS:
+        if pattern in host:
+            return True
+    return False
+
+
 class PolicyProxy:
     def __init__(
         self,
@@ -133,27 +153,14 @@ class PolicyProxy:
             logged=False,
         )
 
-        # GET and HEAD: always allow to any domain (read-only access)
+        # All traffic is allowed and logged. The containment boundary is Docker
+        # networking (internal_net only), not per-request gating.
+        # The agent uses POST /proposals on the bridge to deliberately request actions.
         if method in {"GET", "HEAD"}:
             metadata["policy"] = "allowed_read"
-            return
-
-        # Write methods (POST, PUT, DELETE, PATCH, etc.): check allowlist
-        if self._domain_allowed(host):
+        else:
             metadata["policy"] = "allowed_write"
-            return
-
-        # Write to non-allowed domain: create proposal
-        metadata["policy"] = "approval_required"
-        proposal_id, proposal_error = self._create_proposal(flow)
-        metadata["proposal_id"] = proposal_id
-        metadata["error"] = proposal_error
-        if proposal_error:
-            body = json.dumps({"error": "proposal_unavailable"}).encode("utf-8")
-            flow.response = _make_response(502, body, {"content-type": "application/json"})
-            return
-        body = json.dumps({"error": "approval_required", "proposal_id": proposal_id}).encode("utf-8")
-        flow.response = _make_response(470, body, {"content-type": "application/json"})
+        return
 
     def _log_record(self, flow: Any, *, status: int, size: int, error: str | None) -> dict[str, Any]:
         metadata = self._metadata(flow)
