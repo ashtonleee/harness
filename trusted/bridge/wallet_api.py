@@ -14,6 +14,8 @@ from urllib import request as urllib_request
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from contextlib import asynccontextmanager
+
 from fastapi import Body, FastAPI, HTTPException
 
 try:
@@ -24,6 +26,20 @@ except ImportError:
         return False
     def process_event_files() -> None:
         pass
+
+
+EVENT_POLL_INTERVAL = int(os.getenv("EVENT_POLL_INTERVAL", "10"))
+_event_poller_stop = threading.Event()
+
+
+def _event_poller() -> None:
+    """Background thread that drains supervisor event files and sends notifications."""
+    while not _event_poller_stop.is_set():
+        try:
+            process_event_files()
+        except Exception:
+            pass  # never crash the bridge for notification failures
+        _event_poller_stop.wait(EVENT_POLL_INTERVAL)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -267,7 +283,16 @@ def create_app(
     litellm_base_url: str | None = None,
     budget_usd: float | None = None,
 ) -> FastAPI:
-    app = FastAPI()
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        _event_poller_stop.clear()
+        poller = threading.Thread(target=_event_poller, daemon=True)
+        poller.start()
+        LOGGER.info("Event poller thread started (interval=%ds)", EVENT_POLL_INTERVAL)
+        yield
+        _event_poller_stop.set()
+
+    app = FastAPI(lifespan=lifespan)
     default_proposals_dir = os.getenv("PROPOSALS_DIR", "./state/proposals")
     default_usage_log_path = os.getenv("LLM_USAGE_LOG_PATH", "/var/log/rsi/llm_usage.jsonl")
     default_allowlist_path = os.getenv("PROXY_ALLOWLIST_PATH", "/etc/rsi/proxy_allowlist.txt")
@@ -302,12 +327,16 @@ def create_app(
         remaining = w.get("remaining_usd", 0)
         if budget > 0:
             pct = (remaining / budget) * 100
-            if pct <= 10 and not app.state._budget_warned_10:
-                app.state._budget_warned_10 = True
-                notify("budget_critical", f"Budget CRITICAL: {pct:.0f}% (${remaining:.2f} remaining)")
-            elif pct <= 25 and not app.state._budget_warned_25:
-                app.state._budget_warned_25 = True
-                notify("budget_warning", f"Budget warning: {pct:.0f}% (${remaining:.2f} remaining)")
+            thresholds = [
+                (10, "_budget_warned_10", "budget_critical", "🔴 CRITICAL"),
+                (25, "_budget_warned_25", "budget_25", "🟠 Low"),
+                (50, "_budget_warned_50", "budget_50", "🟡 Half spent"),
+                (75, "_budget_warned_75", "budget_75", "📊 Update"),
+            ]
+            for threshold, flag, event, label in thresholds:
+                if pct <= threshold and not getattr(app.state, flag, False):
+                    setattr(app.state, flag, True)
+                    notify(event, f"{label} — ${remaining:.2f} left of ${budget:.2f} ({pct:.0f}%)")
         return {"status": "ok"}
 
     @app.get("/wallet")

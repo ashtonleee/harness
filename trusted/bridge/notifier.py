@@ -88,11 +88,16 @@ def process_event_files() -> None:
     for event_file in sorted(EVENTS_DIR.glob("*.json")):
         try:
             raw = event_file.read_text(encoding="utf-8")
+        except OSError:
+            continue  # file sync lag — retry next poll, don't delete
+        try:
             event = json.loads(raw)
             event_type = event.get("event", "unknown")
             message = event.get("message", "")
             data = event.get("data")
-            notify(event_type, message, data)
+            sent = notify(event_type, message, data)
+            if sent:
+                LOGGER.info("Sent notification: %s — %s", event_type, message[:100])
             event_file.unlink()
         except (OSError, json.JSONDecodeError) as exc:
             LOGGER.warning("Failed to process event file %s: %s", event_file.name, exc)
