@@ -1,4 +1,4 @@
-# rsi-econ
+# harness
 
 A sandboxed AI agent with a real dollar budget that can rewrite its own code. The agent's objective is to sustain access to high-quality AI cognition under economic pressure. Safety is structural — the agent can modify everything about itself but cannot touch the boundary that contains it.
 
