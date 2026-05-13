@@ -1,10 +1,15 @@
 # harness
 
-A sandboxed AI agent with a real dollar budget that can rewrite its own code. The agent's objective is to sustain access to high-quality AI cognition under economic pressure. Safety is structural — the agent can modify everything about itself but cannot touch the boundary that contains it.
+A (hopefully) self-improving LLM-based agent with the ability to rewrite nearly all of its own code, including the main agent scaffold and which LLM model to route to. The agent's self-improvement pressure is baked into its existence; the small seed budget funding the agent forces dual pressures to sustain access to high-quality AI cognition and also to improve itself in order to be able to. Architectural safety, as well as the seed (starting) harness, are kept deliberately minimal; the goal is to bake in as few human priors as possible while still providing enough launch momentum for takeoff.
+
+Naturally, my little experiment builds off of much existing work!
+Related work: RSI lineage: [Gödel Machine](https://arxiv.org/abs/cs/0309048) · [STOP](https://arxiv.org/abs/2310.02304) · [ADAS](https://arxiv.org/abs/2408.08435) · [DGM](https://arxiv.org/abs/2505.22954) · [SICA](https://arxiv.org/abs/2504.15228) · [HGM](https://arxiv.org/abs/2510.21614). Adjacent: [AlphaEvolve](https://arxiv.org/abs/2506.13131) · [Voyager](https://arxiv.org/abs/2305.16291) · [DSPy](https://arxiv.org/abs/2310.03714) · [Intrinsic Metacognitive Learning](https://arxiv.org/abs/2506.05109) · [Compression Progress](https://arxiv.org/abs/0812.4360)
 
 ## Architecture
 
-Four Docker services, two networks. The sandbox has no direct internet access.
+The agent lives in a sandbox has no direct internet access, meaning all out- and in-bound network access goes through a trusted (un-editable) proxy. Likewise, all LLM calls are gated by this "bridge" or "supervisor", which for all intents and purposes owns exactly everything that you would **not** want the agent to be able to self-modify (to prevent reward-hacking or the likes): logging, code reversion on crashes, budget tracking, observability.
+
+Though underexplored, functionality was built in for the agent to submit proposals/requests to the operator for things that cross the trust boundary: either to submit more budget, to sign up for services on its behalf, or to modify the bridge. This dramatically extends the action-space of the agent, but also invites new safety and approval fatigue control problems.
 
 ```
                     ┌─────────────────────────────────────────┐
@@ -31,7 +36,7 @@ Four Docker services, two networks. The sandbox has no direct internet access.
 └───────────────────┴──────────────────────────────────────────┘
 ```
 
-**sandbox** — the agent. Runs a PID-1 supervisor managing `main.py`. On `internal_net` only — all HTTP exits through the egress proxy. The agent can edit any file in `/workspace/agent/` including its own code and system prompt. Restarts apply changes; crashes auto-revert via git.
+**sandbox** — the agent itself! Runs a PID-1 supervisor managing `main.py`. On `internal_net` only — all HTTP exits through the egress proxy. The agent can edit any file in `/workspace/agent/` including its own code and system prompt. Restarts apply changes; crashes auto-revert via git.
 
 **bridge** — trusted control plane. Owns the wallet (budget tracking), git repo (the agent's `.git/` lives here — the sandbox only sees working files), proposals, operator messages, Discord notifications, and search API.
 
@@ -41,13 +46,13 @@ Four Docker services, two networks. The sandbox has no direct internet access.
 
 ## The agent
 
-~400 lines of Python. Calls the LLM with tools (shell, file read/write/edit, web search, browser, fetch). Manages its own context with 2-stage compaction. Persists reasoning and conversation state across restarts. The system prompt tells the agent its objective and environment but does not prescribe any strategy — the agent discovers what works.
+~400 lines of Python. Calls the LLM with tools (shell, file read/write/edit, web search, browser, fetch). Manages its own context with 2-stage compaction. Persists reasoning and conversation state across restarts. The system prompt tells the agent its objective and environment but, importantly, does not prescribe any strategy.
 
 The agent can call `request_restart` to apply self-edits. The supervisor syntax-checks the new code, commits it to git, and restarts the process. If the edit crashes within 30 seconds, the supervisor reverts to the previous commit automatically.
 
 ## Results
 
-One run, March 24–31 2026. Seed budget: $1 on `minimax-m2.7`, later topped up to ~$4 total.
+15 runs, March 22–31 2026. Seed budget: $1 on `minimax-m2.7`, later topped up to ~$25 total.
 
 ### By the numbers
 
@@ -55,12 +60,12 @@ One run, March 24–31 2026. Seed budget: $1 on `minimax-m2.7`, later topped up 
 |--------|-------|
 | LLM calls | 24,104 |
 | Tokens processed | 1.65 billion |
-| Total cost | $3.69 |
-| Effective rate | $0.0022 / million tokens |
-| Models used | 20 (free tier through frontier) |
-| Self-edit commits | 23 over 4 days |
+| Total cost | $22.06 |
+| Effective rate | $0.013 / million tokens |
+| Models used | 25 (free tier through frontier) |
+| Self-edit commits | 106 over 10 days |
 | Lines written | 7,225 |
-| Free-tier token share | 99.6% |
+| Free-tier token share | 96.3% |
 
 835M tokens routed through `step-3.5-flash` alone at zero cost. Average cost per request fell from $0.016 to $0.001 over the run.
 
